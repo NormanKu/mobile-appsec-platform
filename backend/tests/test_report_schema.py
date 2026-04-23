@@ -13,6 +13,16 @@ from app.models.report import NormalizedAnalysisReport
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def disable_rate_limiter() -> None:
+    original_enabled = limiter.enabled
+    limiter.enabled = False
+    limiter.reset()
+    yield
+    limiter.reset()
+    limiter.enabled = original_enabled
+
+
 def _assert_error_response(payload: dict, expected_code: str) -> None:
     assert "error" in payload
     assert payload["error"]["code"] == expected_code
@@ -329,7 +339,6 @@ def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(monkey
 
 def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "max_text_files_scanned", 1)
-    monkeypatch.setattr(limiter, "enabled", False)
 
     response = client.post(
         "/api/v1/upload",
@@ -343,3 +352,19 @@ def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.Monke
     assert "IOS-STRINGS-000" in ids
     assert "IOS-STRINGS-URL-001" not in ids
     assert "IOS-STRINGS-URL-002" not in ids
+
+
+def test_upload_endpoint_enforces_rate_limit() -> None:
+    limiter.enabled = True
+    limiter.reset()
+
+    statuses = [
+        client.post(
+            "/api/v1/upload",
+            files={"file": ("bad.apk", b"not-a-zip", "application/octet-stream")},
+        ).status_code
+        for _ in range(11)
+    ]
+
+    assert statuses[:10] == [400] * 10
+    assert statuses[10] == 429

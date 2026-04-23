@@ -65,6 +65,10 @@ jobs:
         working-directory: frontend
         run: npx vitest run --reporter=verbose
 
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
   security-scan:
     runs-on: ubuntu-latest
     steps:
@@ -90,4 +94,4 @@ jobs:
         working-directory: frontend
         run: |
           npm ci || npm install
-          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high

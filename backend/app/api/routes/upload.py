@@ -4,6 +4,7 @@ from functools import partial
 from fastapi import APIRouter, File, Request, UploadFile
 
 from app.core.config import settings
+from app.core.rate_limiter import limiter
 from app.models.error import ErrorResponse
 from app.models.report import IOS_EXAMPLE_REPORT, ANDROID_EXAMPLE_REPORT, NormalizedAnalysisReport
 from app.services.report_builder import build_normalized_report
@@ -32,6 +33,7 @@ router = APIRouter(tags=["analysis"])
         422: {"model": ErrorResponse, "description": "Validation error"},
     },
 )
+@limiter.limit(settings.rate_limit_upload)
 async def upload_binary(request: Request, file: UploadFile = File(...)) -> NormalizedAnalysisReport:
     file_name, extension = validate_upload_file(file)
     platform = "android" if extension in {".apk", ".aab"} else "ios"
