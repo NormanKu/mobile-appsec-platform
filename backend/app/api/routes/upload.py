@@ -1,11 +1,12 @@
-import os
+import asyncio
+from functools import partial
 
 from fastapi import APIRouter, File, UploadFile
 
 from app.models.error import ErrorResponse
 from app.models.report import IOS_EXAMPLE_REPORT, ANDROID_EXAMPLE_REPORT, NormalizedAnalysisReport
 from app.services.report_builder import build_normalized_report
-from app.services.upload_validator import persist_upload_to_temp, validate_upload_file
+from app.services.upload_validator import validate_upload_file
 
 router = APIRouter(tags=["analysis"])
 
@@ -34,17 +35,16 @@ async def upload_binary(file: UploadFile = File(...)) -> NormalizedAnalysisRepor
     file_name, extension = validate_upload_file(file)
     platform = "android" if extension in {".apk", ".aab"} else "ios"
 
-    temp_path = persist_upload_to_temp(file, extension)
-    try:
-        with open(temp_path, "rb") as uploaded_binary:
-            file_bytes = uploaded_binary.read()
+    file_bytes = await file.read()
 
-        return build_normalized_report(
+    report = await asyncio.get_event_loop().run_in_executor(
+        None,
+        partial(
+            build_normalized_report,
             file_name=file_name,
             platform=platform,
             file_bytes=file_bytes,
             file_extension=extension,
-        )
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        ),
+    )
+    return report

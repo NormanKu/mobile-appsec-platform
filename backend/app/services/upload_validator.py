@@ -1,5 +1,4 @@
 from pathlib import Path
-import tempfile
 
 from fastapi import UploadFile
 
@@ -31,18 +30,6 @@ def validate_upload_file(file: UploadFile) -> tuple[str, str]:
         )
 
     return file_name, extension
-
-
-def persist_upload_to_temp(file: UploadFile, extension: str) -> str:
-    with tempfile.NamedTemporaryFile(mode="wb", suffix=extension, prefix="upload_", delete=False) as tmp:
-        tmp_path = tmp.name
-        file.file.seek(0)
-        while True:
-            chunk = file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            tmp.write(chunk)
-    return tmp_path
 
 
 def _get_upload_size(file: UploadFile) -> int:

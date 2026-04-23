@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobile-appsec-platform"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["analyzers*"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "backend/tests",
+    "analyzers/android/tests",
+    "analyzers/ios/tests",
+    "analyzers/tests",
+]

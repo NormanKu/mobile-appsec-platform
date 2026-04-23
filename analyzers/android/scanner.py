@@ -5,6 +5,8 @@ from io import BytesIO
 import re
 from zipfile import BadZipFile, ZipFile
 
+from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
+
 URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|passwd|password)\s*[:=]\s*[\"']?([A-Za-z0-9_\-+/=]{8,})"
@@ -61,11 +63,24 @@ def analyze_android_package(
 
     try:
         with ZipFile(BytesIO(file_bytes), "r") as archive:
+            validate_zip_limits(archive)
             metadata = _extract_basic_metadata(extension=extension, archive=archive, file_bytes=file_bytes)
             findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
             findings.extend(_inspect_manifest(archive=archive, metadata=metadata))
             findings.extend(_scan_archive_strings(archive=archive))
             return findings
+    except ZipExtractionLimitExceeded as exc:
+        return [
+            {
+                "id": "ANDROID-ARCHIVE-BOMB",
+                "title": "Archive exceeds safe extraction limits",
+                "severity": "critical",
+                "category": "file-format",
+                "description": str(exc),
+                "recommendation": "Verify the archive is not maliciously crafted and retry with a smaller package",
+                "source": "archive/zip",
+            }
+        ]
     except BadZipFile:
         return [
             {

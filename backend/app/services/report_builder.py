@@ -1,15 +1,9 @@
 from datetime import datetime, timezone
-from pathlib import Path
-import sys
+
+from analyzers.android.scanner import analyze_android_package
+from analyzers.ios.scanner import analyze_ios_package
 
 from app.models.report import CategorySummary, Metadata, NormalizedAnalysisReport, Summary
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
-
-from analyzers.android.scanner import analyze_android_package  # noqa: E402
-from analyzers.ios.scanner import analyze_ios_package  # noqa: E402
 
 RISK_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_SCORE_PENALTY = {"low": 5, "medium": 12, "high": 22, "critical": 35}
