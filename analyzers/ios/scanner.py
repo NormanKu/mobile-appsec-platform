@@ -37,6 +37,9 @@ def analyze_ios_package(
     file_bytes: bytes,
     file_extension: str,
     max_extracted_bytes: int | None = None,
+    max_files: int | None = None,
+    max_text_file_size: int | None = None,
+    max_text_files_scanned: int | None = None,
 ) -> list[dict[str, str]]:
     extension = file_extension.lower()
     if extension != ".ipa":
@@ -54,14 +57,24 @@ def analyze_ios_package(
 
     try:
         with ZipFile(BytesIO(file_bytes), "r") as archive:
-            if max_extracted_bytes is None:
-                validate_zip_limits(archive)
-            else:
-                validate_zip_limits(archive, max_extracted_bytes=max_extracted_bytes)
+            zip_limit_kwargs: dict[str, int] = {}
+            if max_extracted_bytes is not None:
+                zip_limit_kwargs["max_extracted_bytes"] = max_extracted_bytes
+            if max_files is not None:
+                zip_limit_kwargs["max_files"] = max_files
+            validate_zip_limits(archive, **zip_limit_kwargs)
             metadata = _extract_basic_metadata(archive=archive, file_bytes=file_bytes)
             findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
             findings.extend(_inspect_info_plist(archive=archive, metadata=metadata))
-            findings.extend(_scan_archive_strings(archive=archive))
+            findings.extend(
+                _scan_archive_strings(
+                    archive=archive,
+                    max_text_file_size=MAX_TEXT_FILE_SIZE if max_text_file_size is None else max_text_file_size,
+                    max_text_files_scanned=(
+                        MAX_TEXT_FILES_SCANNED if max_text_files_scanned is None else max_text_files_scanned
+                    ),
+                )
+            )
             return findings
     except ZipExtractionLimitExceeded as exc:
         return [
@@ -233,17 +246,21 @@ def _inspect_info_plist(archive: ZipFile, metadata: IosPackageMetadata) -> list[
     return findings
 
 
-def _scan_archive_strings(archive: ZipFile) -> list[dict[str, str]]:
+def _scan_archive_strings(
+    archive: ZipFile,
+    max_text_file_size: int = MAX_TEXT_FILE_SIZE,
+    max_text_files_scanned: int = MAX_TEXT_FILES_SCANNED,
+) -> list[dict[str, str]]:
     urls: set[str] = set()
     insecure_http_urls: set[str] = set()
     secrets: set[str] = set()
     scanned_files = 0
 
     for entry in archive.infolist():
-        if entry.is_dir() or scanned_files >= MAX_TEXT_FILES_SCANNED:
+        if entry.is_dir() or scanned_files >= max_text_files_scanned:
             continue
 
-        if not _looks_like_text(entry.filename, entry.file_size):
+        if not _looks_like_text(entry.filename, entry.file_size, max_text_file_size=max_text_file_size):
             continue
 
         scanned_files += 1
@@ -332,8 +349,8 @@ def _has_insecure_http_exceptions(ats: object) -> bool:
     return False
 
 
-def _looks_like_text(file_name: str, size: int) -> bool:
-    if size <= 0 or size > MAX_TEXT_FILE_SIZE:
+def _looks_like_text(file_name: str, size: int, max_text_file_size: int = MAX_TEXT_FILE_SIZE) -> bool:
+    if size <= 0 or size > max_text_file_size:
         return False
     lower = file_name.lower()
     return any(lower.endswith(ext) for ext in TEXT_EXTENSIONS)

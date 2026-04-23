@@ -6,6 +6,39 @@ import HomePage from "../page";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
+const mockReport = {
+  platform: "android",
+  file_name: "test.apk",
+  risk_level: "medium",
+  score: 72,
+  summary: {
+    total_findings: 3,
+    by_severity: { low: 1, medium: 1, high: 1, critical: 0 },
+  },
+  findings: [
+    {
+      id: "ANDROID-001",
+      title: "Test finding",
+      severity: "high",
+      category: "security",
+      description: "A test finding",
+      recommendation: "Fix it",
+      source: "test",
+    },
+  ],
+  categories: [{ name: "security", count: 1, max_severity: "high" }],
+  metadata: {
+    generated_at: "2025-01-01T00:00:00Z",
+    analyzer_version: "0.1.0",
+    analysis_mode: "static-placeholder",
+    file_extension: ".apk",
+  },
+};
+
+function getFileInput(): HTMLInputElement {
+  return document.querySelector('input[type="file"]') as HTMLInputElement;
+}
+
 describe("HomePage", () => {
   beforeEach(() => {
     mockFetch.mockReset();
@@ -31,50 +64,40 @@ describe("HomePage", () => {
   });
 
   it("shows loading state during upload", async () => {
+    let resolveFetch: (value: {
+      ok: boolean;
+      json: () => Promise<typeof mockReport>;
+    }) => void = () => undefined;
+
     mockFetch.mockImplementation(
-      () => new Promise((resolve) => setTimeout(() => resolve({ ok: true, json: () => Promise.resolve({}) }), 1000))
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve as typeof resolveFetch;
+        })
     );
 
     render(<HomePage />);
 
-    const fileInput = screen.getByRole("textbox", { hidden: true }) || document.querySelector('input[type="file"]');
     const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
+    fireEvent.change(getFileInput(), { target: { files: [file] } });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
 
-    if (fileInput) {
-      fireEvent.change(fileInput, { target: { files: [file] } });
-    }
+    await waitFor(() => {
+      expect(screen.getByText("Analyzing...")).toBeDefined();
+    });
+    expect(screen.getByText("Analysis in progress. Please wait...")).toBeDefined();
+
+    resolveFetch({
+      ok: true,
+      json: () => Promise.resolve(mockReport),
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Report")).toBeDefined();
+    });
   });
 
   it("displays report after successful upload", async () => {
-    const mockReport = {
-      platform: "android",
-      file_name: "test.apk",
-      risk_level: "medium",
-      score: 72,
-      summary: {
-        total_findings: 3,
-        by_severity: { low: 1, medium: 1, high: 1, critical: 0 },
-      },
-      findings: [
-        {
-          id: "ANDROID-001",
-          title: "Test finding",
-          severity: "high",
-          category: "security",
-          description: "A test finding",
-          recommendation: "Fix it",
-          source: "test",
-        },
-      ],
-      categories: [{ name: "security", count: 1, max_severity: "high" }],
-      metadata: {
-        generated_at: "2025-01-01T00:00:00Z",
-        analyzer_version: "0.1.0",
-        analysis_mode: "static-placeholder",
-        file_extension: ".apk",
-      },
-    };
-
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(mockReport),
@@ -82,9 +105,8 @@ describe("HomePage", () => {
 
     render(<HomePage />);
 
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
-    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.change(getFileInput(), { target: { files: [file] } });
 
     const submitButton = screen.getByText("Upload for Analysis");
     fireEvent.click(submitButton);
@@ -108,9 +130,8 @@ describe("HomePage", () => {
 
     render(<HomePage />);
 
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
-    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.change(getFileInput(), { target: { files: [file] } });
 
     const submitButton = screen.getByText("Upload for Analysis");
     fireEvent.click(submitButton);

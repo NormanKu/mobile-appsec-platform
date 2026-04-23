@@ -71,3 +71,23 @@ def test_ios_scanner_honors_custom_zip_limit() -> None:
     )
 
     assert findings[0]["id"] == "IOS-ARCHIVE-BOMB"
+
+
+def test_ios_scanner_honors_custom_text_file_size_limit() -> None:
+    info_plist = {"CFBundleIdentifier": "com.example.limit"}
+    file_name, file_bytes, ext = _build_ipa(
+        info_plist,
+        "client_secret=supersecretvalue\nendpoint=https://api.example.com",
+    )
+
+    findings = analyze_ios_package(
+        file_name=file_name,
+        file_bytes=file_bytes,
+        file_extension=ext,
+        max_text_file_size=10,
+    )
+    ids = {finding["id"] for finding in findings}
+
+    assert "IOS-STRINGS-000" in ids
+    assert "IOS-STRINGS-URL-001" not in ids
+    assert "IOS-STRINGS-SECRET-001" not in ids

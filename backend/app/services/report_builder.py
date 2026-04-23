@@ -106,6 +106,9 @@ def build_normalized_report(
     file_bytes: bytes | None = None,
     file_extension: str | None = None,
     max_zip_extracted_bytes: int | None = None,
+    max_zip_files: int | None = None,
+    max_text_file_size: int | None = None,
+    max_text_files_scanned: int | None = None,
 ) -> NormalizedAnalysisReport:
     if platform == "android":
         if file_bytes is None or file_extension is None:
@@ -127,6 +130,9 @@ def build_normalized_report(
                 file_bytes=file_bytes,
                 file_extension=file_extension,
                 max_extracted_bytes=max_zip_extracted_bytes,
+                max_files=max_zip_files,
+                max_text_file_size=max_text_file_size,
+                max_text_files_scanned=max_text_files_scanned,
             )
             normalized_extension = file_extension if file_extension in {".apk", ".aab"} else ".apk"
     elif platform == "ios":
@@ -149,6 +155,9 @@ def build_normalized_report(
                 file_bytes=file_bytes,
                 file_extension=file_extension,
                 max_extracted_bytes=max_zip_extracted_bytes,
+                max_files=max_zip_files,
+                max_text_file_size=max_text_file_size,
+                max_text_files_scanned=max_text_files_scanned,
             )
             normalized_extension = ".ipa"
     else:

@@ -85,3 +85,20 @@ def test_android_scanner_honors_custom_zip_limit() -> None:
     )
 
     assert findings[0]["id"] == "ANDROID-ARCHIVE-BOMB"
+
+
+def test_android_scanner_honors_custom_text_file_size_limit() -> None:
+    manifest = '<manifest package="com.example.limit" xmlns:android="http://schemas.android.com/apk/res/android" />'
+    name, raw, ext = _build_android_archive(".apk", manifest, "token=mysecretvalue\nurl=https://api.example.com")
+
+    findings = analyze_android_package(
+        file_name=name,
+        file_bytes=raw,
+        file_extension=ext,
+        max_text_file_size=10,
+    )
+    ids = {finding["id"] for finding in findings}
+
+    assert "ANDROID-STRINGS-000" in ids
+    assert "ANDROID-STRINGS-URL-001" not in ids
+    assert "ANDROID-STRINGS-SECRET-001" not in ids

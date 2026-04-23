@@ -51,6 +51,9 @@ async def upload_binary(request: Request, file: UploadFile = File(...)) -> Norma
             file_bytes=file_bytes,
             file_extension=extension,
             max_zip_extracted_bytes=settings.max_zip_extracted_bytes,
+            max_zip_files=settings.max_zip_files,
+            max_text_file_size=settings.max_text_file_size,
+            max_text_files_scanned=settings.max_text_files_scanned,
         ),
     )
     return report

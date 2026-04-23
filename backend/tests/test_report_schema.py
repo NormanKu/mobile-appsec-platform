@@ -6,6 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.routes import upload as upload_route
 from app.core.config import settings
 from app.main import app
 from app.models.report import NormalizedAnalysisReport
@@ -298,3 +299,48 @@ def test_upload_endpoint_rejects_zip_archive_over_safe_limit(monkeypatch: pytest
     payload = response.json()
     _assert_error_response(payload, "ARCHIVE_LIMIT_EXCEEDED")
     assert payload["error"]["details"]["finding_id"] == "ANDROID-ARCHIVE-BOMB"
+
+
+def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "max_upload_size_bytes", 10_000)
+    monkeypatch.setattr(settings, "max_zip_files", 1)
+    monkeypatch.setattr(upload_route.limiter, "enabled", False)
+
+    response = client.post(
+        "/api/v1/upload",
+        files={
+            "file": (
+                "limit.apk",
+                _build_zip_payload(
+                    {
+                        "AndroidManifest.xml": '<manifest package="com.example.limit" />',
+                        "assets/config.txt": "url=https://api.example.com",
+                    }
+                ),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    payload = response.json()
+    _assert_error_response(payload, "ARCHIVE_LIMIT_EXCEEDED")
+    assert payload["error"]["details"]["finding_id"] == "ANDROID-ARCHIVE-BOMB"
+
+
+def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "max_text_files_scanned", 1)
+    monkeypatch.setattr(upload_route.limiter, "enabled", False)
+
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample.ipa", _build_ipa_payload(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    ids = {finding["id"] for finding in payload["findings"]}
+
+    assert "IOS-STRINGS-000" in ids
+    assert "IOS-STRINGS-URL-001" not in ids
+    assert "IOS-STRINGS-URL-002" not in ids
