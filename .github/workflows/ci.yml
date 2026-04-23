@@ -90,4 +90,4 @@ jobs:
         working-directory: frontend
         run: |
           npm ci || npm install
-          npm audit --audit-level=high || true
+          npm audit --audit-level=high

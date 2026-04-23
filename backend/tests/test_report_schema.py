@@ -6,9 +6,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.routes import upload as upload_route
 from app.core.config import settings
-from app.main import app
+from app.main import app, limiter
 from app.models.report import NormalizedAnalysisReport
 
 client = TestClient(app)
@@ -304,7 +303,7 @@ def test_upload_endpoint_rejects_zip_archive_over_safe_limit(monkeypatch: pytest
 def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "max_upload_size_bytes", 10_000)
     monkeypatch.setattr(settings, "max_zip_files", 1)
-    monkeypatch.setattr(upload_route.limiter, "enabled", False)
+    monkeypatch.setattr(limiter, "enabled", False)
 
     response = client.post(
         "/api/v1/upload",
@@ -330,7 +329,7 @@ def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(monkey
 
 def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "max_text_files_scanned", 1)
-    monkeypatch.setattr(upload_route.limiter, "enabled", False)
+    monkeypatch.setattr(limiter, "enabled", False)
 
     response = client.post(
         "/api/v1/upload",

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from io import BytesIO
 import re
 from zipfile import BadZipFile, ZipFile
 
 from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
+
+logger = logging.getLogger(__name__)
 
 URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
 SECRET_PATTERN = re.compile(
@@ -301,7 +304,8 @@ def _scan_archive_strings(
         scanned_files += 1
         try:
             content = archive.read(file_name).decode("utf-8", errors="ignore")
-        except Exception:
+        except (OSError, KeyError) as exc:
+            logger.debug("Skipping unreadable archive entry %s: %s", file_name, exc)
             continue
 
         urls.update(URL_PATTERN.findall(content))
