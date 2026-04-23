@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from io import BytesIO
 import plistlib
@@ -7,6 +8,8 @@ import re
 from zipfile import BadZipFile, ZipFile
 
 from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
+
+logger = logging.getLogger(__name__)
 
 URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
 SECRET_PATTERN = re.compile(
@@ -29,7 +32,12 @@ class IosPackageMetadata:
     minimum_os_version: str | None
 
 
-def analyze_ios_package(file_name: str, file_bytes: bytes, file_extension: str) -> list[dict[str, str]]:
+def analyze_ios_package(
+    file_name: str,
+    file_bytes: bytes,
+    file_extension: str,
+    max_extracted_bytes: int | None = None,
+) -> list[dict[str, str]]:
     extension = file_extension.lower()
     if extension != ".ipa":
         return [
@@ -46,7 +54,10 @@ def analyze_ios_package(file_name: str, file_bytes: bytes, file_extension: str) 
 
     try:
         with ZipFile(BytesIO(file_bytes), "r") as archive:
-            validate_zip_limits(archive)
+            if max_extracted_bytes is None:
+                validate_zip_limits(archive)
+            else:
+                validate_zip_limits(archive, max_extracted_bytes=max_extracted_bytes)
             metadata = _extract_basic_metadata(archive=archive, file_bytes=file_bytes)
             findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
             findings.extend(_inspect_info_plist(archive=archive, metadata=metadata))
@@ -86,7 +97,8 @@ def _extract_basic_metadata(archive: ZipFile, file_bytes: bytes) -> IosPackageMe
     if info_plist_path:
         try:
             info = plistlib.loads(archive.read(info_plist_path))
-        except Exception:
+        except (plistlib.InvalidFileException, ValueError, KeyError) as exc:
+            logger.warning("Failed to parse Info.plist at %s: %s", info_plist_path, exc)
             info = None
 
     return IosPackageMetadata(
@@ -331,7 +343,8 @@ def _plist_to_string(content: bytes) -> str:
     try:
         parsed = plistlib.loads(content)
         return str(parsed)
-    except Exception:
+    except (plistlib.InvalidFileException, ValueError, KeyError) as exc:
+        logger.debug("Plist binary decode fallback for entry: %s", exc)
         return content.decode("utf-8", errors="ignore")
 
 
