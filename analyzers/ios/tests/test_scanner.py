@@ -1,6 +1,6 @@
 from io import BytesIO
 import plistlib
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from analyzers.ios.scanner import analyze_ios_package
 
@@ -8,7 +8,7 @@ from analyzers.ios.scanner import analyze_ios_package
 def _build_ipa(info_plist: dict, extra_text: str) -> tuple[str, bytes, str]:
     file_name = "sample.ipa"
     buffer = BytesIO()
-    with ZipFile(buffer, "w") as archive:
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("Payload/Sample.app/Info.plist", plistlib.dumps(info_plist))
         archive.writestr("Payload/Sample.app/config.txt", extra_text)
     return file_name, buffer.getvalue(), ".ipa"
@@ -57,3 +57,17 @@ def test_invalid_ipa_returns_critical_finding() -> None:
 
     assert findings[0]["id"] == "IOS-ARCHIVE-001"
     assert findings[0]["severity"] == "critical"
+
+
+def test_ios_scanner_honors_custom_zip_limit() -> None:
+    info_plist = {"CFBundleIdentifier": "com.example.limit"}
+    file_name, file_bytes, ext = _build_ipa(info_plist, "A" * 2_000)
+
+    findings = analyze_ios_package(
+        file_name=file_name,
+        file_bytes=file_bytes,
+        file_extension=ext,
+        max_extracted_bytes=500,
+    )
+
+    assert findings[0]["id"] == "IOS-ARCHIVE-BOMB"

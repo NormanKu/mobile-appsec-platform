@@ -3,10 +3,19 @@ from datetime import datetime, timezone
 from analyzers.android.scanner import analyze_android_package
 from analyzers.ios.scanner import analyze_ios_package
 
+from app.errors.exceptions import UploadValidationError
 from app.models.report import CategorySummary, Metadata, NormalizedAnalysisReport, Summary
 
 RISK_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_SCORE_PENALTY = {"low": 5, "medium": 12, "high": 22, "critical": 35}
+INVALID_ARCHIVE_FINDING_IDS = {
+    "ANDROID-ARCHIVE-001",
+    "ANDROID-MANIFEST-404",
+    "IOS-ARCHIVE-001",
+    "IOS-PLIST-002",
+    "IOS-PLIST-404",
+}
+ARCHIVE_LIMIT_FINDING_IDS = {"ANDROID-ARCHIVE-BOMB", "IOS-ARCHIVE-BOMB"}
 
 
 def _enrich_finding_sources(findings: list[dict[str, str]], platform: str) -> list[dict[str, str]]:
@@ -56,8 +65,47 @@ def _calculate_score(findings: list[dict[str, str]]) -> int:
     return max(0, 100 - penalty)
 
 
+def _raise_for_terminal_findings(
+    findings: list[dict[str, str]],
+    file_name: str,
+    platform: str,
+) -> None:
+    for finding in findings:
+        if finding["id"] in ARCHIVE_LIMIT_FINDING_IDS:
+            raise UploadValidationError(
+                code="ARCHIVE_LIMIT_EXCEEDED",
+                message="Uploaded archive exceeds safe extraction limits",
+                status_code=413,
+                details={
+                    "file_name": file_name,
+                    "platform": platform,
+                    "finding_id": finding["id"],
+                    "reason": finding["description"],
+                    "source": finding["source"],
+                },
+            )
+
+        if finding["id"] in INVALID_ARCHIVE_FINDING_IDS:
+            raise UploadValidationError(
+                code="INVALID_ARCHIVE",
+                message="Uploaded archive is invalid or missing required package metadata",
+                status_code=400,
+                details={
+                    "file_name": file_name,
+                    "platform": platform,
+                    "finding_id": finding["id"],
+                    "reason": finding["description"],
+                    "source": finding["source"],
+                },
+            )
+
+
 def build_normalized_report(
-    file_name: str, platform: str, file_bytes: bytes | None = None, file_extension: str | None = None
+    file_name: str,
+    platform: str,
+    file_bytes: bytes | None = None,
+    file_extension: str | None = None,
+    max_zip_extracted_bytes: int | None = None,
 ) -> NormalizedAnalysisReport:
     if platform == "android":
         if file_bytes is None or file_extension is None:
@@ -78,6 +126,7 @@ def build_normalized_report(
                 file_name=file_name,
                 file_bytes=file_bytes,
                 file_extension=file_extension,
+                max_extracted_bytes=max_zip_extracted_bytes,
             )
             normalized_extension = file_extension if file_extension in {".apk", ".aab"} else ".apk"
     elif platform == "ios":
@@ -99,12 +148,14 @@ def build_normalized_report(
                 file_name=file_name,
                 file_bytes=file_bytes,
                 file_extension=file_extension,
+                max_extracted_bytes=max_zip_extracted_bytes,
             )
             normalized_extension = ".ipa"
     else:
         raise ValueError(f"Unsupported platform: {platform}")
 
     findings = _enrich_finding_sources(findings, platform)
+    _raise_for_terminal_findings(findings=findings, file_name=file_name, platform=platform)
 
     return NormalizedAnalysisReport(
         platform=platform,

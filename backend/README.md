@@ -34,7 +34,14 @@ See `backend/app/models/report.py` for typed models and example Android/iOS resp
 
 - Supported extensions: `.apk`, `.aab`, `.ipa`
 - Maximum upload size: configured via `max_upload_size_bytes` (default 25 MB)
-- Invalid uploads return:
+- Maximum safe extracted archive size: configured via `max_zip_extracted_bytes` (default 200 MB)
+- Invalid uploads return JSON errors with `error.code`, `error.message`, and `error.details`
+- Common error codes:
+  - `INVALID_FILE_TYPE`: unsupported extension
+  - `FILE_TOO_LARGE`: uploaded file exceeds `max_upload_size_bytes`
+  - `INVALID_ARCHIVE`: ZIP is malformed or missing required package metadata
+  - `ARCHIVE_LIMIT_EXCEEDED`: archive exceeds safe extraction limits
+- Example error:
 
 ```json
 {

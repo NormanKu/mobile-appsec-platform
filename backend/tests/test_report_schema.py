@@ -1,4 +1,7 @@
 from datetime import datetime, timezone
+from io import BytesIO
+import plistlib
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +18,52 @@ def _assert_error_response(payload: dict, expected_code: str) -> None:
     assert payload["error"]["code"] == expected_code
     assert isinstance(payload["error"]["message"], str)
     assert "details" in payload["error"]
+
+
+def _build_apk_payload() -> bytes:
+    manifest = '''
+    <manifest package="com.example.app" xmlns:android="http://schemas.android.com/apk/res/android">
+      <application android:debuggable="true" />
+    </manifest>
+    '''
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("AndroidManifest.xml", manifest)
+        archive.writestr("assets/config.txt", "token=mysecretvalue\nurl=https://api.example.com")
+    return buffer.getvalue()
+
+
+def _build_aab_payload() -> bytes:
+    manifest = '''
+    <manifest package="com.example.bundle" xmlns:android="http://schemas.android.com/apk/res/android">
+      <application android:debuggable="false" />
+    </manifest>
+    '''
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("base/manifest/AndroidManifest.xml", manifest)
+        archive.writestr("BundleConfig.pb", b"placeholder")
+        archive.writestr("base/assets/config.txt", "url=https://bundle.example.com")
+    return buffer.getvalue()
+
+
+def _build_ipa_payload() -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "Payload/Sample.app/Info.plist",
+            plistlib.dumps({"CFBundleIdentifier": "com.example.ios"}),
+        )
+        archive.writestr("Payload/Sample.app/config.txt", "url=https://ios.example.com")
+    return buffer.getvalue()
+
+
+def _build_zip_payload(entries: dict[str, bytes | str]) -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
 
 
 def test_schema_accepts_valid_android_report() -> None:
@@ -99,7 +148,7 @@ def test_schema_rejects_mismatched_category_count() -> None:
 def test_upload_endpoint_returns_extended_schema_for_apk() -> None:
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.apk", b"placeholder", "application/octet-stream")},
+        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
     )
 
     assert response.status_code == 200
@@ -114,13 +163,26 @@ def test_upload_endpoint_returns_extended_schema_for_apk() -> None:
 def test_upload_endpoint_returns_extended_schema_for_aab() -> None:
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.aab", b"PK\x03\x04", "application/octet-stream")},
+        files={"file": ("sample.aab", _build_aab_payload(), "application/octet-stream")},
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["platform"] == "android"
     assert payload["metadata"]["file_extension"] == ".aab"
+    assert all(finding["id"] != "ANDROID-MANIFEST-404" for finding in payload["findings"])
+
+
+def test_upload_endpoint_returns_extended_schema_for_ipa() -> None:
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample.ipa", _build_ipa_payload(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["platform"] == "ios"
+    assert payload["metadata"]["file_extension"] == ".ipa"
 
 
 def test_upload_endpoint_rejects_unsupported_extension_with_error_code() -> None:
@@ -150,3 +212,89 @@ def test_upload_endpoint_rejects_oversized_upload(monkeypatch: pytest.MonkeyPatc
 
     assert response.status_code == 413
     _assert_error_response(response.json(), "FILE_TOO_LARGE")
+
+
+def test_upload_endpoint_rejects_invalid_android_archive() -> None:
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("bad.apk", b"not-a-zip", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    _assert_error_response(payload, "INVALID_ARCHIVE")
+    assert payload["error"]["details"]["finding_id"] == "ANDROID-ARCHIVE-001"
+
+
+def test_upload_endpoint_rejects_missing_android_manifest() -> None:
+    response = client.post(
+        "/api/v1/upload",
+        files={
+            "file": (
+                "broken.apk",
+                _build_zip_payload({"assets/config.txt": "noop"}),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    _assert_error_response(payload, "INVALID_ARCHIVE")
+    assert payload["error"]["details"]["finding_id"] == "ANDROID-MANIFEST-404"
+
+
+def test_upload_endpoint_rejects_invalid_ios_archive() -> None:
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("bad.ipa", b"not-a-zip", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    _assert_error_response(payload, "INVALID_ARCHIVE")
+    assert payload["error"]["details"]["finding_id"] == "IOS-ARCHIVE-001"
+
+
+def test_upload_endpoint_rejects_missing_ios_info_plist() -> None:
+    response = client.post(
+        "/api/v1/upload",
+        files={
+            "file": (
+                "broken.ipa",
+                _build_zip_payload({"Payload/Sample.app/config.txt": "noop"}),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    _assert_error_response(payload, "INVALID_ARCHIVE")
+    assert payload["error"]["details"]["finding_id"] == "IOS-PLIST-404"
+
+
+def test_upload_endpoint_rejects_zip_archive_over_safe_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "max_upload_size_bytes", 10_000)
+    monkeypatch.setattr(settings, "max_zip_extracted_bytes", 500)
+
+    response = client.post(
+        "/api/v1/upload",
+        files={
+            "file": (
+                "limit.apk",
+                _build_zip_payload(
+                    {
+                        "AndroidManifest.xml": '<manifest package="com.example.limit" />',
+                        "assets/big.txt": "A" * 2_000,
+                    }
+                ),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    payload = response.json()
+    _assert_error_response(payload, "ARCHIVE_LIMIT_EXCEEDED")
+    assert payload["error"]["details"]["finding_id"] == "ANDROID-ARCHIVE-BOMB"

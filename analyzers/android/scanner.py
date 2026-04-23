@@ -37,6 +37,7 @@ class AndroidPackageMetadata:
     package_type: str
     archive_size_bytes: int
     file_count: int
+    manifest_path: str | None
     manifest_present: bool
     manifest_decodable: bool
     package_name: str | None = None
@@ -45,7 +46,10 @@ class AndroidPackageMetadata:
 
 
 def analyze_android_package(
-    file_name: str, file_bytes: bytes, file_extension: str
+    file_name: str,
+    file_bytes: bytes,
+    file_extension: str,
+    max_extracted_bytes: int | None = None,
 ) -> list[dict[str, str]]:
     extension = file_extension.lower()
     if extension not in {".apk", ".aab"}:
@@ -63,7 +67,10 @@ def analyze_android_package(
 
     try:
         with ZipFile(BytesIO(file_bytes), "r") as archive:
-            validate_zip_limits(archive)
+            if max_extracted_bytes is None:
+                validate_zip_limits(archive)
+            else:
+                validate_zip_limits(archive, max_extracted_bytes=max_extracted_bytes)
             metadata = _extract_basic_metadata(extension=extension, archive=archive, file_bytes=file_bytes)
             findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
             findings.extend(_inspect_manifest(archive=archive, metadata=metadata))
@@ -97,8 +104,9 @@ def analyze_android_package(
 
 def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes) -> AndroidPackageMetadata:
     names = archive.namelist()
-    manifest_present = "AndroidManifest.xml" in names
-    manifest_content = archive.read("AndroidManifest.xml") if manifest_present else b""
+    manifest_path = _resolve_manifest_path(extension=extension, names=names)
+    manifest_present = manifest_path is not None
+    manifest_content = archive.read(manifest_path) if manifest_path else b""
 
     manifest_text: str | None = None
     if manifest_content:
@@ -115,6 +123,7 @@ def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes)
         package_type="apk" if extension == ".apk" else "aab",
         archive_size_bytes=len(file_bytes),
         file_count=len(names),
+        manifest_path=manifest_path,
         manifest_present=manifest_present,
         manifest_decodable=manifest_text is not None if manifest_present else False,
         package_name=package_name,
@@ -128,6 +137,7 @@ def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -
         f"package_type={metadata.package_type}",
         f"archive_size_bytes={metadata.archive_size_bytes}",
         f"file_count={metadata.file_count}",
+        f"manifest_path={metadata.manifest_path or 'missing'}",
         f"manifest_present={metadata.manifest_present}",
         f"manifest_decodable={metadata.manifest_decodable}",
     ]
@@ -154,24 +164,24 @@ def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -
         findings.append(
             {
                 "id": "ANDROID-MANIFEST-404",
-                "title": "AndroidManifest.xml not found",
+                "title": "Android manifest not found",
                 "severity": "high",
                 "category": "manifest",
-                "description": "Archive does not contain AndroidManifest.xml",
+                "description": "Archive does not contain a supported Android manifest path",
                 "recommendation": "Validate build output and ensure manifest is packaged",
-                "source": "AndroidManifest.xml",
+                "source": "archive/manifest",
             }
         )
     elif not metadata.manifest_decodable:
         findings.append(
             {
                 "id": "ANDROID-MANIFEST-002",
-                "title": "AndroidManifest.xml could not be decoded",
+                "title": "Android manifest could not be decoded",
                 "severity": "medium",
                 "category": "manifest",
                 "description": "Manifest may be binary encoded; text-level checks were limited",
                 "recommendation": "Add binary AXML parsing for deeper manifest analysis",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path or "archive/manifest",
             }
         )
 
@@ -179,10 +189,10 @@ def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -
 
 
 def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
-    if not metadata.manifest_present or not metadata.manifest_decodable:
+    if not metadata.manifest_present or not metadata.manifest_decodable or not metadata.manifest_path:
         return []
 
-    manifest = archive.read("AndroidManifest.xml").decode("utf-8")
+    manifest = archive.read(metadata.manifest_path).decode("utf-8")
     findings: list[dict[str, str]] = []
 
     if 'android:debuggable="true"' in manifest:
@@ -194,7 +204,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "manifest",
                 "description": "android:debuggable is true, which weakens production app security",
                 "recommendation": "Set android:debuggable to false for release builds",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -207,7 +217,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "network",
                 "description": "Manifest allows cleartext traffic",
                 "recommendation": "Disable cleartext traffic and enforce TLS",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -221,7 +231,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "backup",
                 "description": "Heuristic finding: android:allowBackup=true may increase data extraction risk on compromised or debug-enabled devices",
                 "recommendation": "Set android:allowBackup=false unless backup behavior is explicitly required",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -238,7 +248,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "backup",
                 "description": "Heuristic finding: backup appears enabled but neither fullBackupContent nor dataExtractionRules is defined",
                 "recommendation": "Define explicit backup/data extraction rules or disable backups for sensitive apps",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -251,7 +261,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "manifest",
                 "description": "One or more components are exported and may increase attack surface",
                 "recommendation": "Validate exported components are intentional and permission-protected",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -342,3 +352,15 @@ def _extract_first(pattern: re.Pattern[str], text: str | None) -> str | None:
 
     match = pattern.search(text)
     return match.group(1) if match else None
+
+
+def _resolve_manifest_path(extension: str, names: list[str]) -> str | None:
+    candidates = ["AndroidManifest.xml"]
+    if extension == ".aab":
+        candidates = ["base/manifest/AndroidManifest.xml", "AndroidManifest.xml"]
+
+    for candidate in candidates:
+        if candidate in names:
+            return candidate
+
+    return None

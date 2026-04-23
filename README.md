@@ -134,6 +134,7 @@ Example response objects are defined in `backend/app/models/report.py` as:
 
 - User uploads `.apk`, `.aab`, or `.ipa` file from frontend.
 - Backend validates extension, enforces upload size limits, and infers platform.
+- Malformed archives, missing required package metadata, and unsafe ZIP payloads return JSON errors instead of a normalized report.
 - Backend routes to platform analyzer module:
   - `analyzers/android/scanner.py`
   - `analyzers/ios/scanner.py`
@@ -141,6 +142,13 @@ Example response objects are defined in `backend/app/models/report.py` as:
 - Android analyzer includes practical **heuristic** checks (e.g., debuggable/backup flags, URLs, candidate secrets) and may produce false positives.
 - iOS analyzer includes practical **heuristic** checks (e.g., ATS exceptions, suspicious URLs, candidate secrets) and may produce false positives.
 - Invalid uploads return consistent JSON errors with `error.code`, `error.message`, and `error.details`.
+
+Common upload error codes:
+
+- `INVALID_FILE_TYPE`: unsupported extension
+- `FILE_TOO_LARGE`: uploaded file exceeds `max_upload_size_bytes`
+- `INVALID_ARCHIVE`: ZIP is malformed or missing required package metadata such as Android manifest / iOS `Info.plist`
+- `ARCHIVE_LIMIT_EXCEEDED`: compressed archive would exceed safe extraction limits
 
 ---
 
