@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from io import BytesIO
 import re
 from zipfile import BadZipFile, ZipFile
 
+from analyzers.android.external_tools import (
+    AndroidExternalToolResult,
+    analyze_with_jadx,
+)
+from analyzers.patterns import URL_PATTERN, SECRET_PATTERN
 from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
 
-URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
-SECRET_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|secret|token|passwd|password)\s*[:=]\s*[\"']?([A-Za-z0-9_\-+/=]{8,})"
-)
+logger = logging.getLogger(__name__)
 MANIFEST_PACKAGE_PATTERN = re.compile(r'package\s*=\s*"([^"]+)"')
 MANIFEST_VERSION_NAME_PATTERN = re.compile(r'android:versionName\s*=\s*"([^"]+)"')
 MANIFEST_VERSION_CODE_PATTERN = re.compile(r'android:versionCode\s*=\s*"([^"]+)"')
@@ -30,6 +33,7 @@ TEXT_EXTENSIONS = {
 }
 MAX_TEXT_FILE_SIZE = 1_000_000
 MAX_TEXT_FILES_SCANNED = 200
+MAX_EXTERNAL_TOOL_SAMPLE_VALUES = 5
 
 
 @dataclass
@@ -37,6 +41,7 @@ class AndroidPackageMetadata:
     package_type: str
     archive_size_bytes: int
     file_count: int
+    manifest_path: str | None
     manifest_present: bool
     manifest_decodable: bool
     package_name: str | None = None
@@ -45,60 +50,159 @@ class AndroidPackageMetadata:
 
 
 def analyze_android_package(
-    file_name: str, file_bytes: bytes, file_extension: str
+    file_name: str,
+    file_bytes: bytes,
+    file_extension: str,
+    max_extracted_bytes: int | None = None,
+    max_files: int | None = None,
+    max_text_file_size: int | None = None,
+    max_text_files_scanned: int | None = None,
 ) -> list[dict[str, str]]:
     extension = file_extension.lower()
     if extension not in {".apk", ".aab"}:
-        return [
-            {
-                "id": "ANDROID-FORMAT-001",
-                "title": "Unsupported Android package format",
-                "severity": "high",
-                "category": "file-format",
-                "description": f"File {file_name} has unsupported extension: {extension}",
-                "recommendation": "Provide an Android .apk or .aab package",
-                "source": "upload/extension",
-            }
-        ]
+        return _finalize_findings(
+            [
+                {
+                    "id": "ANDROID-FORMAT-001",
+                    "title": "Unsupported Android package format",
+                    "severity": "high",
+                    "category": "file-format",
+                    "description": f"File {file_name} has unsupported extension: {extension}",
+                    "recommendation": "Provide an Android .apk or .aab package",
+                    "source": "upload/extension",
+                }
+            ]
+        )
 
     try:
         with ZipFile(BytesIO(file_bytes), "r") as archive:
-            validate_zip_limits(archive)
-            metadata = _extract_basic_metadata(extension=extension, archive=archive, file_bytes=file_bytes)
-            findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
-            findings.extend(_inspect_manifest(archive=archive, metadata=metadata))
-            findings.extend(_scan_archive_strings(archive=archive))
-            return findings
+            zip_limit_kwargs: dict[str, int] = {}
+            if max_extracted_bytes is not None:
+                zip_limit_kwargs["max_extracted_bytes"] = max_extracted_bytes
+            if max_files is not None:
+                zip_limit_kwargs["max_files"] = max_files
+            validate_zip_limits(archive, **zip_limit_kwargs)
+            findings: list[dict[str, object]] = []
+            metadata: AndroidPackageMetadata | None = None
+
+            try:
+                metadata = _extract_basic_metadata(
+                    extension=extension, archive=archive, file_bytes=file_bytes
+                )
+                findings.extend(
+                    _build_metadata_findings(file_name=file_name, metadata=metadata)
+                )
+            except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                logger.warning(
+                    "Android metadata inspection failed for %s: %s", file_name, exc
+                )
+                findings.append(
+                    _build_diagnostic_finding(
+                        code="ANDROID-METADATA-WARN-001",
+                        title="Android metadata inspection failed",
+                        message="Android package metadata could not be fully extracted",
+                        stage="archive-metadata-inspection",
+                        source="archive/metadata",
+                        recommendation="Review archive structure and retry with a package produced by the normal release build",
+                        details={"reason": str(exc)},
+                    )
+                )
+
+            if metadata is not None:
+                try:
+                    findings.extend(
+                        _inspect_manifest(archive=archive, metadata=metadata)
+                    )
+                except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                    logger.warning(
+                        "Android manifest inspection failed for %s: %s", file_name, exc
+                    )
+                    findings.append(
+                        _build_diagnostic_finding(
+                            code="ANDROID-MANIFEST-WARN-001",
+                            title="Android manifest inspection failed",
+                            message="AndroidManifest.xml checks could not be fully completed",
+                            stage="manifest-inspection",
+                            source=metadata.manifest_path or "archive/manifest",
+                            recommendation="Validate the manifest encoding and rerun analysis before relying on manifest-specific results",
+                            details={"reason": str(exc)},
+                        )
+                    )
+
+            try:
+                findings.extend(
+                    _scan_archive_strings(
+                        archive=archive,
+                        max_text_file_size=MAX_TEXT_FILE_SIZE
+                        if max_text_file_size is None
+                        else max_text_file_size,
+                        max_text_files_scanned=(
+                            MAX_TEXT_FILES_SCANNED
+                            if max_text_files_scanned is None
+                            else max_text_files_scanned
+                        ),
+                    )
+                )
+            except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                logger.warning(
+                    "Android archive string scan failed for %s: %s", file_name, exc
+                )
+                findings.append(
+                    _build_diagnostic_finding(
+                        code="ANDROID-STRINGS-WARN-001",
+                        title="Android string scan failed",
+                        message="Archive string inspection could not be fully completed",
+                        stage="archive-string-scan",
+                        source="archive/strings",
+                        recommendation="Review package readability and rerun analysis before relying on URL or secret detection results",
+                        details={"reason": str(exc)},
+                    )
+                )
+
+            if extension == ".apk":
+                findings.extend(
+                    _scan_external_android_tools(
+                        file_name=file_name, file_bytes=file_bytes
+                    )
+                )
+            return _finalize_findings(findings)
     except ZipExtractionLimitExceeded as exc:
-        return [
-            {
-                "id": "ANDROID-ARCHIVE-BOMB",
-                "title": "Archive exceeds safe extraction limits",
-                "severity": "critical",
-                "category": "file-format",
-                "description": str(exc),
-                "recommendation": "Verify the archive is not maliciously crafted and retry with a smaller package",
-                "source": "archive/zip",
-            }
-        ]
+        return _finalize_findings(
+            [
+                {
+                    "id": "ANDROID-ARCHIVE-BOMB",
+                    "title": "Archive exceeds safe extraction limits",
+                    "severity": "critical",
+                    "category": "file-format",
+                    "description": str(exc),
+                    "recommendation": "Verify the archive is not maliciously crafted and retry with a smaller package",
+                    "source": "archive/zip",
+                }
+            ]
+        )
     except BadZipFile:
-        return [
-            {
-                "id": "ANDROID-ARCHIVE-001",
-                "title": "Invalid Android archive",
-                "severity": "critical",
-                "category": "file-format",
-                "description": f"{file_name} is not a valid ZIP-based Android package",
-                "recommendation": "Rebuild or re-export the application package and retry",
-                "source": "archive/zip",
-            }
-        ]
+        return _finalize_findings(
+            [
+                {
+                    "id": "ANDROID-ARCHIVE-001",
+                    "title": "Invalid Android archive",
+                    "severity": "critical",
+                    "category": "file-format",
+                    "description": f"{file_name} is not a valid ZIP-based Android package",
+                    "recommendation": "Rebuild or re-export the application package and retry",
+                    "source": "archive/zip",
+                }
+            ]
+        )
 
 
-def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes) -> AndroidPackageMetadata:
+def _extract_basic_metadata(
+    extension: str, archive: ZipFile, file_bytes: bytes
+) -> AndroidPackageMetadata:
     names = archive.namelist()
-    manifest_present = "AndroidManifest.xml" in names
-    manifest_content = archive.read("AndroidManifest.xml") if manifest_present else b""
+    manifest_path = _resolve_manifest_path(extension=extension, names=names)
+    manifest_present = manifest_path is not None
+    manifest_content = archive.read(manifest_path) if manifest_path else b""
 
     manifest_text: str | None = None
     if manifest_content:
@@ -115,6 +219,7 @@ def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes)
         package_type="apk" if extension == ".apk" else "aab",
         archive_size_bytes=len(file_bytes),
         file_count=len(names),
+        manifest_path=manifest_path,
         manifest_present=manifest_present,
         manifest_decodable=manifest_text is not None if manifest_present else False,
         package_name=package_name,
@@ -123,11 +228,14 @@ def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes)
     )
 
 
-def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
+def _build_metadata_findings(
+    file_name: str, metadata: AndroidPackageMetadata
+) -> list[dict[str, str]]:
     details = [
         f"package_type={metadata.package_type}",
         f"archive_size_bytes={metadata.archive_size_bytes}",
         f"file_count={metadata.file_count}",
+        f"manifest_path={metadata.manifest_path or 'missing'}",
         f"manifest_present={metadata.manifest_present}",
         f"manifest_decodable={metadata.manifest_decodable}",
     ]
@@ -154,35 +262,41 @@ def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -
         findings.append(
             {
                 "id": "ANDROID-MANIFEST-404",
-                "title": "AndroidManifest.xml not found",
+                "title": "Android manifest not found",
                 "severity": "high",
                 "category": "manifest",
-                "description": "Archive does not contain AndroidManifest.xml",
+                "description": "Archive does not contain a supported Android manifest path",
                 "recommendation": "Validate build output and ensure manifest is packaged",
-                "source": "AndroidManifest.xml",
+                "source": "archive/manifest",
             }
         )
     elif not metadata.manifest_decodable:
         findings.append(
             {
                 "id": "ANDROID-MANIFEST-002",
-                "title": "AndroidManifest.xml could not be decoded",
+                "title": "Android manifest could not be decoded",
                 "severity": "medium",
                 "category": "manifest",
                 "description": "Manifest may be binary encoded; text-level checks were limited",
                 "recommendation": "Add binary AXML parsing for deeper manifest analysis",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path or "archive/manifest",
             }
         )
 
     return findings
 
 
-def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
-    if not metadata.manifest_present or not metadata.manifest_decodable:
+def _inspect_manifest(
+    archive: ZipFile, metadata: AndroidPackageMetadata
+) -> list[dict[str, str]]:
+    if (
+        not metadata.manifest_present
+        or not metadata.manifest_decodable
+        or not metadata.manifest_path
+    ):
         return []
 
-    manifest = archive.read("AndroidManifest.xml").decode("utf-8")
+    manifest = archive.read(metadata.manifest_path).decode("utf-8")
     findings: list[dict[str, str]] = []
 
     if 'android:debuggable="true"' in manifest:
@@ -194,7 +308,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "manifest",
                 "description": "android:debuggable is true, which weakens production app security",
                 "recommendation": "Set android:debuggable to false for release builds",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -207,10 +321,9 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "network",
                 "description": "Manifest allows cleartext traffic",
                 "recommendation": "Disable cleartext traffic and enforce TLS",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
-
 
     if 'android:allowBackup="true"' in manifest:
         findings.append(
@@ -221,14 +334,14 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "backup",
                 "description": "Heuristic finding: android:allowBackup=true may increase data extraction risk on compromised or debug-enabled devices",
                 "recommendation": "Set android:allowBackup=false unless backup behavior is explicitly required",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
     if (
         'android:allowBackup="true"' in manifest
-        and 'android:fullBackupContent=' not in manifest
-        and 'android:dataExtractionRules=' not in manifest
+        and "android:fullBackupContent=" not in manifest
+        and "android:dataExtractionRules=" not in manifest
     ):
         findings.append(
             {
@@ -238,7 +351,7 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "backup",
                 "description": "Heuristic finding: backup appears enabled but neither fullBackupContent nor dataExtractionRules is defined",
                 "recommendation": "Define explicit backup/data extraction rules or disable backups for sensitive apps",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
@@ -251,30 +364,39 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
                 "category": "manifest",
                 "description": "One or more components are exported and may increase attack surface",
                 "recommendation": "Validate exported components are intentional and permission-protected",
-                "source": "AndroidManifest.xml",
+                "source": metadata.manifest_path,
             }
         )
 
     return findings
 
 
-def _scan_archive_strings(archive: ZipFile) -> list[dict[str, str]]:
+def _scan_archive_strings(
+    archive: ZipFile,
+    max_text_file_size: int = MAX_TEXT_FILE_SIZE,
+    max_text_files_scanned: int = MAX_TEXT_FILES_SCANNED,
+) -> list[dict[str, str]]:
     urls: set[str] = set()
     secrets: set[str] = set()
     scanned_files = 0
 
     for entry in archive.infolist():
-        if entry.is_dir() or scanned_files >= MAX_TEXT_FILES_SCANNED:
+        if entry.is_dir() or scanned_files >= max_text_files_scanned:
             continue
 
         file_name = entry.filename
-        if not _looks_like_text(file_name=file_name, size=entry.file_size):
+        if not _looks_like_text(
+            file_name=file_name,
+            size=entry.file_size,
+            max_text_file_size=max_text_file_size,
+        ):
             continue
 
         scanned_files += 1
         try:
             content = archive.read(file_name).decode("utf-8", errors="ignore")
-        except Exception:
+        except (OSError, KeyError) as exc:
+            logger.debug("Skipping unreadable archive entry %s: %s", file_name, exc)
             continue
 
         urls.update(URL_PATTERN.findall(content))
@@ -328,8 +450,10 @@ def _scan_archive_strings(archive: ZipFile) -> list[dict[str, str]]:
     return findings
 
 
-def _looks_like_text(file_name: str, size: int) -> bool:
-    if size <= 0 or size > MAX_TEXT_FILE_SIZE:
+def _looks_like_text(
+    file_name: str, size: int, max_text_file_size: int = MAX_TEXT_FILE_SIZE
+) -> bool:
+    if size <= 0 or size > max_text_file_size:
         return False
 
     lower = file_name.lower()
@@ -342,3 +466,309 @@ def _extract_first(pattern: re.Pattern[str], text: str | None) -> str | None:
 
     match = pattern.search(text)
     return match.group(1) if match else None
+
+
+def _resolve_manifest_path(extension: str, names: list[str]) -> str | None:
+    candidates = ["AndroidManifest.xml"]
+    if extension == ".aab":
+        candidates = ["base/manifest/AndroidManifest.xml", "AndroidManifest.xml"]
+
+    for candidate in candidates:
+        if candidate in names:
+            return candidate
+
+    return None
+
+
+def _scan_external_android_tools(
+    file_name: str, file_bytes: bytes
+) -> list[dict[str, str]]:
+    try:
+        tool_result = analyze_with_jadx(file_name=file_name, file_bytes=file_bytes)
+    except Exception as exc:
+        logger.warning("JADX enrichment raised unexpectedly for %s: %s", file_name, exc)
+        return [
+            _build_diagnostic_finding(
+                code="ANDROID-JADX-FAILED",
+                title="JADX enrichment failed",
+                message="JADX code enrichment raised an unexpected error",
+                stage="jadx-source-analysis",
+                source="jadx",
+                recommendation="Review JADX installation and analyzer logs, then rerun analysis if code-level Android checks are required",
+                tool="jadx",
+                details={"reason": str(exc)},
+            )
+        ]
+    return _build_jadx_findings(tool_result)
+
+
+def _build_jadx_findings(
+    tool_result: AndroidExternalToolResult,
+) -> list[dict[str, str]]:
+    if not tool_result.available:
+        return [
+            _build_diagnostic_finding(
+                code="ANDROID-JADX-SKIPPED",
+                title="JADX enrichment skipped",
+                message="JADX was not available, so Android code-level enrichment was skipped",
+                stage="jadx-source-analysis",
+                source="jadx",
+                recommendation="Install and configure JADX to enable Android code-level heuristics",
+                tool="jadx",
+                details={"available": False, "executed": False},
+            )
+        ]
+
+    if not tool_result.executed:
+        return [
+            _build_diagnostic_finding(
+                code="ANDROID-JADX-FAILED",
+                title="JADX enrichment failed",
+                message="JADX was available but did not complete successfully",
+                stage="jadx-source-analysis",
+                source="jadx",
+                recommendation="Review the JADX error and rerun analysis if code-level Android checks are required",
+                tool="jadx",
+                details={
+                    "available": True,
+                    "executed": False,
+                    "error": tool_result.error or "unknown error",
+                },
+            )
+        ]
+
+    grouped = _group_external_tool_values(tool_result)
+    findings: list[dict[str, str]] = []
+
+    readable_source = grouped.get("readable_source", [])
+    if readable_source:
+        sample = ", ".join(readable_source[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES])
+        findings.append(
+            {
+                "id": "ANDROID-JADX-CODE-001",
+                "title": "Heuristic: readable source identifiers recovered from APK code",
+                "severity": "medium",
+                "category": "code",
+                "description": (
+                    "Heuristic finding: JADX recovered readable source identifiers from "
+                    f"{tool_result.source_files_scanned} decompiled source file(s), sample: {sample}"
+                ),
+                "recommendation": (
+                    "Review release obfuscation settings (R8/ProGuard) and keep sensitive logic server-side where possible"
+                ),
+                "source": "jadx/source",
+                "evidence": readable_source[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
+                "detection_method": "jadx-source-analysis",
+                "source_location": _first_signal_location(
+                    tool_result, "readable_source"
+                ),
+            }
+        )
+
+    hardcoded_urls = grouped.get("hardcoded_url", [])
+    if hardcoded_urls:
+        sample = ", ".join(hardcoded_urls[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES])
+        findings.append(
+            {
+                "id": "ANDROID-JADX-URL-001",
+                "title": "Heuristic: hardcoded URLs discovered in decompiled Android code",
+                "severity": "medium",
+                "category": "network",
+                "description": (
+                    "Heuristic finding: JADX surfaced "
+                    f"{len(hardcoded_urls)} hardcoded URL(s) in decompiled source, sample: {sample}"
+                ),
+                "recommendation": "Review embedded endpoints for insecure, staging, or non-production destinations",
+                "source": "jadx/source",
+                "evidence": hardcoded_urls[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
+                "detection_method": "jadx-source-analysis",
+                "source_location": _first_signal_location(tool_result, "hardcoded_url"),
+            }
+        )
+
+    candidate_secrets = grouped.get("candidate_secret", [])
+    if candidate_secrets:
+        sample = ", ".join(candidate_secrets[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES])
+        findings.append(
+            {
+                "id": "ANDROID-JADX-SECRET-001",
+                "title": "Heuristic: candidate secrets found in decompiled Android code",
+                "severity": "high",
+                "category": "secrets",
+                "description": (
+                    "Heuristic finding: JADX surfaced "
+                    f"{len(candidate_secrets)} candidate secret assignment(s), sample: {sample}"
+                ),
+                "recommendation": "Remove embedded secrets and move credentials behind server-side controls",
+                "source": "jadx/source",
+                "evidence": candidate_secrets[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
+                "detection_method": "jadx-source-analysis",
+                "source_location": _first_signal_location(
+                    tool_result, "candidate_secret"
+                ),
+            }
+        )
+
+    naming_patterns = grouped.get("naming_pattern", [])
+    if naming_patterns:
+        sample = ", ".join(naming_patterns[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES])
+        findings.append(
+            {
+                "id": "ANDROID-JADX-NAME-001",
+                "title": "Heuristic: notable package or class names surfaced by JADX",
+                "severity": "low",
+                "category": "code",
+                "description": (
+                    "Heuristic finding: Decompiled package/class names suggest debug, internal, or sensitive code areas, "
+                    f"sample: {sample}"
+                ),
+                "recommendation": "Review release packaging to exclude or harden debug-only and sensitive code paths",
+                "source": "jadx/source",
+                "evidence": naming_patterns[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
+                "detection_method": "jadx-source-analysis",
+                "source_location": _first_signal_location(
+                    tool_result, "naming_pattern"
+                ),
+            }
+        )
+
+    return findings
+
+
+def _build_diagnostic_finding(
+    *,
+    code: str,
+    title: str,
+    message: str,
+    stage: str,
+    source: str,
+    recommendation: str,
+    tool: str | None = None,
+    details: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": code,
+        "title": title,
+        "severity": "low",
+        "category": "analysis-warning",
+        "description": message,
+        "recommendation": recommendation,
+        "source": source,
+        "confidence_level": "informational",
+        "evidence": [message],
+        "detection_method": stage,
+        "source_location": None,
+        "diagnostic_level": "warning",
+        "diagnostic_code": code,
+        "diagnostic_message": message,
+        "diagnostic_stage": stage,
+        "diagnostic_tool": tool,
+        "diagnostic_details": details or {},
+    }
+
+
+def _group_external_tool_values(
+    tool_result: AndroidExternalToolResult,
+) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for signal in tool_result.signals:
+        values = grouped.setdefault(signal.kind, [])
+        if signal.value not in values:
+            values.append(signal.value)
+
+    return grouped
+
+
+def _first_signal_location(
+    tool_result: AndroidExternalToolResult, kind: str
+) -> str | None:
+    for signal in tool_result.signals:
+        if signal.kind == kind:
+            return signal.location
+    return None
+
+
+def _finalize_findings(findings: list[dict[str, object]]) -> list[dict[str, object]]:
+    for finding in findings:
+        finding_id = str(finding["id"])
+        source = str(finding.get("source", "android-analyzer"))
+        finding.setdefault("confidence_level", _infer_confidence_level(finding_id))
+        finding.setdefault("evidence", _infer_evidence(finding))
+        finding.setdefault("detection_method", _infer_detection_method(finding_id))
+        finding.setdefault("source_location", _infer_source_location(source))
+    return findings
+
+
+def _infer_confidence_level(finding_id: str) -> str:
+    if finding_id in {
+        "ANDROID-METADATA-001",
+        "ANDROID-STRINGS-000",
+        "ANDROID-MANIFEST-002",
+    }:
+        return "informational"
+    if finding_id.startswith("ANDROID-STRINGS") or finding_id.startswith(
+        "ANDROID-JADX"
+    ):
+        return "heuristic"
+    if finding_id in {"ANDROID-MANIFEST-BACKUP-001", "ANDROID-MANIFEST-BACKUP-002"}:
+        return "heuristic"
+    return "confirmed"
+
+
+def _infer_detection_method(finding_id: str) -> str:
+    if finding_id.startswith("ANDROID-METADATA"):
+        return "archive-metadata-inspection"
+    if finding_id.startswith("ANDROID-MANIFEST"):
+        return "manifest-inspection"
+    if finding_id.startswith("ANDROID-STRINGS"):
+        return "archive-string-scan"
+    if finding_id.startswith("ANDROID-JADX"):
+        return "jadx-source-analysis"
+    if finding_id.endswith("FORMAT-001"):
+        return "extension-validation"
+    if finding_id.endswith("ARCHIVE-001") or finding_id.endswith("ARCHIVE-BOMB"):
+        return "zip-validation"
+    return "android-static-analysis"
+
+
+def _infer_source_location(source: str) -> str | None:
+    return (
+        None
+        if source.startswith("archive/") or source == "upload/extension"
+        else source
+    )
+
+
+def _infer_evidence(finding: dict[str, object]) -> list[str]:
+    finding_id = str(finding["id"])
+    description = str(finding.get("description", ""))
+
+    explicit_evidence = {
+        "ANDROID-MANIFEST-DBG-001": ['android:debuggable="true"'],
+        "ANDROID-MANIFEST-NET-001": ['android:usesCleartextTraffic="true"'],
+        "ANDROID-MANIFEST-BACKUP-001": ['android:allowBackup="true"'],
+        "ANDROID-MANIFEST-BACKUP-002": [
+            'android:allowBackup="true"',
+            "android:fullBackupContent missing",
+            "android:dataExtractionRules missing",
+        ],
+        "ANDROID-MANIFEST-EXP-001": ['android:exported="true"'],
+        "ANDROID-MANIFEST-404": ["supported manifest path missing"],
+        "ANDROID-MANIFEST-002": ["manifest decode failed"],
+        "ANDROID-ARCHIVE-001": ["ZIP parsing failed"],
+    }
+    if finding_id in explicit_evidence:
+        return explicit_evidence[finding_id]
+
+    if finding_id == "ANDROID-METADATA-001":
+        return description.split(": ", 1)[-1].split(", ")[
+            :MAX_EXTERNAL_TOOL_SAMPLE_VALUES
+        ]
+
+    if "sample: " in description:
+        sample = description.split("sample: ", 1)[1]
+        return [item.strip() for item in sample.split(", ") if item.strip()][
+            :MAX_EXTERNAL_TOOL_SAMPLE_VALUES
+        ]
+
+    return []

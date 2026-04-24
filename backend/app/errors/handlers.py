@@ -15,16 +15,21 @@ def _error_payload(code: str, message: str, details: dict | None = None) -> dict
     }
 
 
-async def upload_validation_exception_handler(_: Request, exc: UploadValidationError) -> JSONResponse:
+async def upload_validation_exception_handler(
+    _: Request, exc: UploadValidationError
+) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=_error_payload(exc.code, exc.message, exc.details),
     )
 
 
-async def request_validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+async def request_validation_exception_handler(
+    _: Request, exc: RequestValidationError
+) -> JSONResponse:
     missing_file_error = any(
-        err.get("loc") == ("body", "file") and err.get("type") == "missing" for err in exc.errors()
+        err.get("loc") == ("body", "file") and err.get("type") == "missing"
+        for err in exc.errors()
     )
 
     if missing_file_error:
