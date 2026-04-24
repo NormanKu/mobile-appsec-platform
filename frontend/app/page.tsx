@@ -3,6 +3,7 @@
 import { FormEvent, useMemo, useState } from "react";
 
 type Severity = "low" | "medium" | "high" | "critical";
+type ConfidenceLevel = "confirmed" | "heuristic" | "informational";
 
 type ReportResponse = {
   platform: "android" | "ios";
@@ -21,6 +22,10 @@ type ReportResponse = {
     description: string;
     recommendation: string;
     source: string;
+    confidence_level?: ConfidenceLevel;
+    evidence?: string[];
+    detection_method?: string | null;
+    source_location?: string | null;
   }[];
   categories: { name: string; count: number; max_severity: Severity }[];
   metadata: {
@@ -40,12 +45,35 @@ type ApiErrorResponse = {
 };
 
 const SEVERITY_ORDER: Severity[] = ["critical", "high", "medium", "low"];
+const CONFIDENCE_PREFIX = /^(Confirmed|Heuristic|Informational):\s*/i;
+
+function getConfidenceLevel(finding: ReportResponse["findings"][number]): ConfidenceLevel {
+  if (finding.confidence_level) {
+    return finding.confidence_level;
+  }
+
+  const match = finding.title.match(CONFIDENCE_PREFIX)?.[1]?.toLowerCase();
+  if (match === "confirmed" || match === "heuristic" || match === "informational") {
+    return match;
+  }
+
+  return "heuristic";
+}
+
+function cleanFindingTitle(title: string): string {
+  return title.replace(CONFIDENCE_PREFIX, "");
+}
+
+function formatConfidenceLabel(confidence: ConfidenceLevel): string {
+  return confidence.charAt(0).toUpperCase() + confidence.slice(1);
+}
 
 export default function HomePage() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [errorDetails, setErrorDetails] = useState<Record<string, unknown> | null>(null);
   const [report, setReport] = useState<ReportResponse | null>(null);
 
   const apiBaseUrl = useMemo(
@@ -70,12 +98,14 @@ export default function HomePage() {
     if (!file) {
       setErrorCode("MISSING_FILE");
       setError("Select an APK, AAB, or IPA file first.");
+      setErrorDetails(null);
       return;
     }
 
     setLoading(true);
     setError(null);
     setErrorCode(null);
+    setErrorDetails(null);
     setReport(null);
 
     const formData = new FormData();
@@ -98,6 +128,7 @@ export default function HomePage() {
         if (apiError?.error) {
           setErrorCode(apiError.error.code);
           setError(apiError.error.message);
+          setErrorDetails(apiError.error.details ?? null);
           return;
         }
 
@@ -113,6 +144,7 @@ export default function HomePage() {
           : "Unexpected upload error.";
       setErrorCode("UPLOAD_ERROR");
       setError(message);
+      setErrorDetails(null);
     } finally {
       setLoading(false);
     }
@@ -140,6 +172,20 @@ export default function HomePage() {
         <div className="error" role="alert">
           {errorCode && <p>Error code: {errorCode}</p>}
           <p>{error}</p>
+          {errorCode === "ANALYSIS_FAILED" && (
+            <p>
+              The upload was received, but static analysis did not complete safely. Review the failure stage below before retrying.
+            </p>
+          )}
+          {typeof errorDetails?.stage === "string" && (
+            <p>Failure stage: {errorDetails.stage}</p>
+          )}
+          {typeof errorDetails?.tool === "string" && (
+            <p>Tool: {errorDetails.tool}</p>
+          )}
+          {errorCode === "ANALYSIS_FAILED" && typeof errorDetails?.reason === "string" && (
+            <p>Failure summary: {errorDetails.reason}</p>
+          )}
         </div>
       )}
 
@@ -177,20 +223,53 @@ export default function HomePage() {
           {findingsBySeverity.map((group) => (
             <div key={group.severity} className="severity-group">
               <h4>{group.severity.toUpperCase()}</h4>
-              {group.findings.map((finding) => (
-                <article key={finding.id} className="finding-card">
-                  <p>
-                    <strong>{finding.id}</strong> — {finding.title}
-                  </p>
-                  <p>
-                    Category: {finding.category} | Source: {finding.source}
-                  </p>
-                  <p>{finding.description}</p>
-                  <p>
-                    <strong>Recommendation:</strong> {finding.recommendation}
-                  </p>
-                </article>
-              ))}
+              {group.findings.map((finding) => {
+                const confidence = getConfidenceLevel(finding);
+                const evidence = finding.evidence ?? [];
+
+                return (
+                  <article key={finding.id} className="finding-card">
+                    <div className="finding-header">
+                      <p>
+                        <strong>{finding.id}</strong> — {cleanFindingTitle(finding.title)}
+                      </p>
+                      <span
+                        className={`confidence-badge confidence-${confidence}`}
+                        aria-label={`Confidence ${confidence}`}
+                      >
+                        {formatConfidenceLabel(confidence)}
+                      </span>
+                    </div>
+                    <p>
+                      Category: {finding.category} | Source: {finding.source}
+                    </p>
+                    {finding.source_location && (
+                      <p>
+                        <strong>Location:</strong> {finding.source_location}
+                      </p>
+                    )}
+                    {finding.detection_method && (
+                      <p>
+                        <strong>Detection:</strong> {finding.detection_method}
+                      </p>
+                    )}
+                    <p>{finding.description}</p>
+                    {evidence.length > 0 && (
+                      <div>
+                        <strong>Evidence:</strong>
+                        <ul className="evidence-list">
+                          {evidence.map((entry) => (
+                            <li key={`${finding.id}-${entry}`}>{entry}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <p>
+                      <strong>Recommendation:</strong> {finding.recommendation}
+                    </p>
+                  </article>
+                );
+              })}
             </div>
           ))}
         </section>

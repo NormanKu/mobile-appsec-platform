@@ -49,6 +49,10 @@ mobile-appsec-platform/
 └── analyzers/
     ├── android/
     │   ├── __init__.py
+    │   ├── external_tools/
+    │   │   ├── __init__.py
+    │   │   ├── jadx.py
+    │   │   └── models.py
     │   └── scanner.py
     └── ios/
         ├── __init__.py
@@ -140,6 +144,7 @@ Example response objects are defined in `backend/app/models/report.py` as:
   - `analyzers/ios/scanner.py`
 - Analyzer returns a **placeholder security report JSON**.
 - Android analyzer includes practical **heuristic** checks (e.g., debuggable/backup flags, URLs, candidate secrets) and may produce false positives.
+- Android APK analysis can optionally enrich heuristic findings with local `jadx` output through `analyzers/android/external_tools/`.
 - iOS analyzer includes practical **heuristic** checks (e.g., ATS exceptions, suspicious URLs, candidate secrets) and may produce false positives.
 - Invalid uploads return consistent JSON errors with `error.code`, `error.message`, and `error.details`.
 
@@ -159,7 +164,43 @@ Common upload error codes:
 - Queue/async job workers
 - Cloud deployment infrastructure
 - Dynamic runtime analysis
-- External reverse engineering tooling (MobSF, jadx, Frida, etc.)
+- Large external reverse engineering platforms and dynamic instrumentation (e.g. MobSF orchestration, Frida)
+
+---
+
+## Optional JADX Setup
+
+Android APK analysis can use locally installed `jadx` to enrich heuristic findings with:
+
+- readable source/code exposure indicators
+- suspicious hardcoded URLs
+- candidate secrets or tokens
+- notable package/class naming patterns
+
+If `jadx` is not installed or cannot run, uploads still complete and the backend falls back to the baseline Android heuristics.
+
+Example local setup on macOS:
+
+```bash
+brew install jadx
+jadx --version
+```
+
+Optional environment variables:
+
+```bash
+export APPSEC_ANDROID_JADX_PATH="$(command -v jadx)"
+export APPSEC_ANDROID_JADX_TIMEOUT_SECONDS=45
+export APPSEC_ANDROID_JADX_MAX_SOURCE_FILES=200
+export APPSEC_ANDROID_JADX_MAX_SOURCE_FILE_SIZE=300000
+```
+
+Then start the backend normally:
+
+```bash
+cd backend
+uvicorn app.main:app --reload --port 8000
+```
 
 ---
 

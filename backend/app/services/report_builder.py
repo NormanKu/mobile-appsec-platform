@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from analyzers.android.scanner import analyze_android_package
@@ -5,6 +6,8 @@ from analyzers.ios.scanner import analyze_ios_package
 
 from app.errors.exceptions import UploadValidationError
 from app.models.report import CategorySummary, Metadata, NormalizedAnalysisReport, Summary
+
+logger = logging.getLogger(__name__)
 
 RISK_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_SCORE_PENALTY = {"low": 5, "medium": 12, "high": 22, "critical": 35}
@@ -18,11 +21,40 @@ INVALID_ARCHIVE_FINDING_IDS = {
 ARCHIVE_LIMIT_FINDING_IDS = {"ANDROID-ARCHIVE-BOMB", "IOS-ARCHIVE-BOMB"}
 
 
-def _enrich_finding_sources(findings: list[dict[str, str]], platform: str) -> list[dict[str, str]]:
+def _enrich_finding_sources(findings: list[dict[str, object]], platform: str) -> list[dict[str, object]]:
     default_source = "android-analyzer" if platform == "android" else "ios-analyzer"
     for finding in findings:
-        finding.setdefault("source", default_source)
+        source = str(finding.setdefault("source", default_source))
+        finding.setdefault("confidence_level", "heuristic")
+        finding.setdefault("evidence", [])
+        finding.setdefault("detection_method", _infer_detection_method(finding_id=str(finding["id"]), platform=platform))
+        if "source_location" not in finding or finding["source_location"] is None:
+            finding["source_location"] = source if source != default_source else None
     return findings
+
+
+def _infer_detection_method(finding_id: str, platform: str) -> str:
+    if finding_id.endswith("ARCHIVE-001") or finding_id.endswith("ARCHIVE-BOMB"):
+        return "zip-validation"
+    if finding_id.endswith("FORMAT-001"):
+        return "extension-validation"
+    if finding_id.endswith("INPUT-001"):
+        return "backend-input-validation"
+    if finding_id.startswith("ANDROID-METADATA") or finding_id.startswith("IOS-METADATA"):
+        return "archive-metadata-inspection"
+    if finding_id.startswith("ANDROID-MANIFEST"):
+        return "manifest-inspection"
+    if finding_id.startswith("ANDROID-STRINGS") or finding_id.startswith("IOS-STRINGS"):
+        return "archive-string-scan"
+    if finding_id.startswith("ANDROID-JADX"):
+        return "jadx-source-analysis"
+    if finding_id.startswith("IOS-PLIST"):
+        return "info-plist-inspection"
+    if finding_id.startswith("IOS-ENTITLEMENTS"):
+        return "entitlements-inspection"
+    if finding_id.startswith("IOS-PAYLOAD") or finding_id.startswith("IOS-BINARY"):
+        return "ipa-bundle-validation"
+    return f"{platform}-static-analysis"
 
 
 def _calculate_summary(findings: list[dict[str, str]]) -> Summary:
@@ -63,6 +95,47 @@ def _calculate_risk_level(findings: list[dict[str, str]]) -> str:
 def _calculate_score(findings: list[dict[str, str]]) -> int:
     penalty = sum(SEVERITY_SCORE_PENALTY[finding["severity"]] for finding in findings)
     return max(0, 100 - penalty)
+
+
+def _analysis_failed_error(
+    *,
+    file_name: str,
+    platform: str,
+    stage: str,
+    reason: str,
+) -> UploadValidationError:
+    return UploadValidationError(
+        code="ANALYSIS_FAILED",
+        message="Static analysis could not be completed safely",
+        status_code=500,
+        details={
+            "file_name": file_name,
+            "platform": platform,
+            "stage": stage,
+            "reason": reason,
+        },
+    )
+
+
+def _run_platform_analyzer(
+    *,
+    file_name: str,
+    platform: str,
+    analyzer,
+    analyzer_kwargs: dict[str, object],
+) -> list[dict[str, object]]:
+    try:
+        return analyzer(**analyzer_kwargs)
+    except UploadValidationError:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected %s analyzer failure for %s", platform, file_name)
+        raise _analysis_failed_error(
+            file_name=file_name,
+            platform=platform,
+            stage=f"{platform}-analyzer",
+            reason="Analyzer raised an unexpected error",
+        ) from exc
 
 
 def _raise_for_terminal_findings(
@@ -110,72 +183,101 @@ def build_normalized_report(
     max_text_file_size: int | None = None,
     max_text_files_scanned: int | None = None,
 ) -> NormalizedAnalysisReport:
-    if platform == "android":
-        if file_bytes is None or file_extension is None:
-            findings = [
-                {
-                    "id": "ANDROID-INPUT-001",
-                    "title": "Android analyzer received incomplete input",
-                    "severity": "medium",
-                    "category": "analysis",
-                    "description": "Analyzer requires package bytes and extension for inspection",
-                    "recommendation": "Pass uploaded archive bytes and extension to analyzer",
-                    "source": "backend/report_builder",
-                }
-            ]
-            normalized_extension = ".apk"
+    try:
+        if platform == "android":
+            if file_bytes is None or file_extension is None:
+                findings = [
+                    {
+                        "id": "ANDROID-INPUT-001",
+                        "title": "Android analyzer received incomplete input",
+                        "severity": "medium",
+                        "category": "analysis",
+                        "description": "Analyzer requires package bytes and extension for inspection",
+                        "recommendation": "Pass uploaded archive bytes and extension to analyzer",
+                        "source": "backend/report_builder",
+                        "confidence_level": "informational",
+                        "evidence": ["missing file_bytes or file_extension"],
+                        "detection_method": "backend-input-validation",
+                        "source_location": None,
+                    }
+                ]
+                normalized_extension = ".apk"
+            else:
+                findings = _run_platform_analyzer(
+                    file_name=file_name,
+                    platform=platform,
+                    analyzer=analyze_android_package,
+                    analyzer_kwargs={
+                        "file_name": file_name,
+                        "file_bytes": file_bytes,
+                        "file_extension": file_extension,
+                        "max_extracted_bytes": max_zip_extracted_bytes,
+                        "max_files": max_zip_files,
+                        "max_text_file_size": max_text_file_size,
+                        "max_text_files_scanned": max_text_files_scanned,
+                    },
+                )
+                normalized_extension = file_extension if file_extension in {".apk", ".aab"} else ".apk"
+        elif platform == "ios":
+            if file_bytes is None or file_extension is None:
+                findings = [
+                    {
+                        "id": "IOS-INPUT-001",
+                        "title": "iOS analyzer received incomplete input",
+                        "severity": "medium",
+                        "category": "analysis",
+                        "description": "Analyzer requires package bytes and extension for inspection",
+                        "recommendation": "Pass uploaded archive bytes and extension to analyzer",
+                        "source": "backend/report_builder",
+                        "confidence_level": "informational",
+                        "evidence": ["missing file_bytes or file_extension"],
+                        "detection_method": "backend-input-validation",
+                        "source_location": None,
+                    }
+                ]
+                normalized_extension = ".ipa"
+            else:
+                findings = _run_platform_analyzer(
+                    file_name=file_name,
+                    platform=platform,
+                    analyzer=analyze_ios_package,
+                    analyzer_kwargs={
+                        "file_name": file_name,
+                        "file_bytes": file_bytes,
+                        "file_extension": file_extension,
+                        "max_extracted_bytes": max_zip_extracted_bytes,
+                        "max_files": max_zip_files,
+                        "max_text_file_size": max_text_file_size,
+                        "max_text_files_scanned": max_text_files_scanned,
+                    },
+                )
+                normalized_extension = ".ipa"
         else:
-            findings = analyze_android_package(
-                file_name=file_name,
-                file_bytes=file_bytes,
-                file_extension=file_extension,
-                max_extracted_bytes=max_zip_extracted_bytes,
-                max_files=max_zip_files,
-                max_text_file_size=max_text_file_size,
-                max_text_files_scanned=max_text_files_scanned,
-            )
-            normalized_extension = file_extension if file_extension in {".apk", ".aab"} else ".apk"
-    elif platform == "ios":
-        if file_bytes is None or file_extension is None:
-            findings = [
-                {
-                    "id": "IOS-INPUT-001",
-                    "title": "iOS analyzer received incomplete input",
-                    "severity": "medium",
-                    "category": "analysis",
-                    "description": "Analyzer requires package bytes and extension for inspection",
-                    "recommendation": "Pass uploaded archive bytes and extension to analyzer",
-                    "source": "backend/report_builder",
-                }
-            ]
-            normalized_extension = ".ipa"
-        else:
-            findings = analyze_ios_package(
-                file_name=file_name,
-                file_bytes=file_bytes,
-                file_extension=file_extension,
-                max_extracted_bytes=max_zip_extracted_bytes,
-                max_files=max_zip_files,
-                max_text_file_size=max_text_file_size,
-                max_text_files_scanned=max_text_files_scanned,
-            )
-            normalized_extension = ".ipa"
-    else:
-        raise ValueError(f"Unsupported platform: {platform}")
+            raise ValueError(f"Unsupported platform: {platform}")
 
-    findings = _enrich_finding_sources(findings, platform)
-    _raise_for_terminal_findings(findings=findings, file_name=file_name, platform=platform)
+        findings = _enrich_finding_sources(findings, platform)
+        _raise_for_terminal_findings(findings=findings, file_name=file_name, platform=platform)
 
-    return NormalizedAnalysisReport(
-        platform=platform,
-        file_name=file_name,
-        risk_level=_calculate_risk_level(findings),
-        score=_calculate_score(findings),
-        summary=_calculate_summary(findings),
-        findings=findings,
-        categories=_calculate_categories(findings),
-        metadata=Metadata(
-            generated_at=datetime.now(timezone.utc),
-            file_extension=normalized_extension,
-        ),
-    )
+        return NormalizedAnalysisReport(
+            platform=platform,
+            file_name=file_name,
+            risk_level=_calculate_risk_level(findings),
+            score=_calculate_score(findings),
+            summary=_calculate_summary(findings),
+            findings=findings,
+            categories=_calculate_categories(findings),
+            metadata=Metadata(
+                generated_at=datetime.now(timezone.utc),
+                file_extension=normalized_extension,
+            ),
+        )
+    except UploadValidationError:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected report normalization failure for %s (%s)", file_name, platform)
+        raise _analysis_failed_error(
+            file_name=file_name,
+            platform=platform,
+            stage="report-normalization",
+            reason="Unable to normalize analyzer output",
+        ) from exc

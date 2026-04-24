@@ -95,6 +95,10 @@ def test_schema_accepts_valid_android_report() -> None:
                 "description": "desc",
                 "recommendation": "fix",
                 "source": "AndroidManifest.xml",
+                "confidence_level": "confirmed",
+                "evidence": ['android:debuggable="true"'],
+                "detection_method": "manifest-inspection",
+                "source_location": "AndroidManifest.xml",
             }
         ],
         categories=[
@@ -115,6 +119,89 @@ def test_schema_accepts_valid_android_report() -> None:
     assert report.platform == "android"
     assert report.score == 55
     assert report.summary.total_findings == 1
+    assert report.findings[0].confidence_level == "confirmed"
+    assert report.findings[0].evidence == ['android:debuggable="true"']
+
+
+def test_schema_keeps_new_finding_fields_backward_compatible() -> None:
+    report = NormalizedAnalysisReport(
+        platform="android",
+        file_name="release.apk",
+        risk_level="low",
+        score=95,
+        summary={
+            "total_findings": 1,
+            "by_severity": {"low": 1, "medium": 0, "high": 0, "critical": 0},
+        },
+        findings=[
+            {
+                "id": "ANDROID-LEGACY-1",
+                "title": "Legacy issue",
+                "severity": "low",
+                "category": "analysis",
+                "description": "legacy payload without the additive fields",
+                "recommendation": "noop",
+                "source": "legacy",
+            }
+        ],
+        categories=[
+            {
+                "name": "analysis",
+                "count": 1,
+                "max_severity": "low",
+            }
+        ],
+        metadata={
+            "generated_at": datetime.now(timezone.utc),
+            "analyzer_version": "0.1.0-mvp",
+            "analysis_mode": "static-placeholder",
+            "file_extension": ".apk",
+        },
+    )
+
+    assert report.findings[0].confidence_level == "heuristic"
+    assert report.findings[0].evidence == []
+    assert report.findings[0].detection_method is None
+    assert report.findings[0].source_location is None
+
+
+def test_schema_rejects_invalid_confidence_level() -> None:
+    with pytest.raises(ValueError):
+        NormalizedAnalysisReport(
+            platform="android",
+            file_name="release.apk",
+            risk_level="medium",
+            score=80,
+            summary={
+                "total_findings": 1,
+                "by_severity": {"low": 0, "medium": 1, "high": 0, "critical": 0},
+            },
+            findings=[
+                {
+                    "id": "ANDROID-2",
+                    "title": "Issue",
+                    "severity": "medium",
+                    "category": "analysis",
+                    "description": "desc",
+                    "recommendation": "fix",
+                    "source": "archive/strings",
+                    "confidence_level": "maybe",
+                }
+            ],
+            categories=[
+                {
+                    "name": "analysis",
+                    "count": 1,
+                    "max_severity": "medium",
+                }
+            ],
+            metadata={
+                "generated_at": datetime.now(timezone.utc),
+                "analyzer_version": "0.1.0-mvp",
+                "analysis_mode": "static-placeholder",
+                "file_extension": ".apk",
+            },
+        )
 
 
 def test_schema_rejects_mismatched_category_count() -> None:
@@ -137,6 +224,10 @@ def test_schema_rejects_mismatched_category_count() -> None:
                     "description": "desc",
                     "recommendation": "fix",
                     "source": "Info.plist",
+                    "confidence_level": "heuristic",
+                    "evidence": [],
+                    "detection_method": "entitlements-inspection",
+                    "source_location": "Payload/App.app/archived-expanded-entitlements.xcent",
                 }
             ],
             categories=[
@@ -168,6 +259,9 @@ def test_upload_endpoint_returns_extended_schema_for_apk() -> None:
     assert payload["summary"]["total_findings"] == len(payload["findings"])
     assert sum(category["count"] for category in payload["categories"]) == len(payload["findings"])
     assert all("source" in finding for finding in payload["findings"])
+    assert all("confidence_level" in finding for finding in payload["findings"])
+    assert all("evidence" in finding for finding in payload["findings"])
+    assert all("detection_method" in finding for finding in payload["findings"])
 
 
 def test_upload_endpoint_returns_extended_schema_for_aab() -> None:
@@ -193,6 +287,7 @@ def test_upload_endpoint_returns_extended_schema_for_ipa() -> None:
     payload = response.json()
     assert payload["platform"] == "ios"
     assert payload["metadata"]["file_extension"] == ".ipa"
+    assert all("confidence_level" in finding for finding in payload["findings"])
 
 
 def test_upload_endpoint_rejects_unsupported_extension_with_error_code() -> None:
@@ -352,6 +447,59 @@ def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.Monke
     assert "IOS-STRINGS-000" in ids
     assert "IOS-STRINGS-URL-001" not in ids
     assert "IOS-STRINGS-URL-002" not in ids
+
+
+def test_upload_endpoint_returns_report_when_jadx_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from analyzers.android.external_tools import AndroidExternalToolResult
+
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx",
+        lambda **_: AndroidExternalToolResult(tool_name="jadx", available=False, executed=False),
+    )
+
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert all(not finding["id"].startswith("ANDROID-JADX-") for finding in payload["findings"])
+
+
+def test_upload_endpoint_returns_safe_error_when_android_analyzer_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_android_package",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("android analyzer boom")),
+    )
+
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 500
+    payload = response.json()
+    _assert_error_response(payload, "ANALYSIS_FAILED")
+    assert payload["error"]["details"]["stage"] == "android-analyzer"
+    assert payload["error"]["details"]["platform"] == "android"
+
+
+def test_upload_endpoint_returns_safe_error_when_report_normalization_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_android_package",
+        lambda **_: [{"id": "BROKEN"}],
+    )
+
+    response = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 500
+    payload = response.json()
+    _assert_error_response(payload, "ANALYSIS_FAILED")
+    assert payload["error"]["details"]["stage"] == "report-normalization"
 
 
 def test_upload_endpoint_enforces_rate_limit() -> None:

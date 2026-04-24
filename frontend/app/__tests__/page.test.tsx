@@ -18,12 +18,16 @@ const mockReport = {
   findings: [
     {
       id: "ANDROID-001",
-      title: "Test finding",
+      title: "Heuristic: Test finding",
       severity: "high",
       category: "security",
       description: "A test finding",
       recommendation: "Fix it",
       source: "test",
+      confidence_level: "heuristic",
+      evidence: ["hardcoded_url=https://staging.example.com"],
+      detection_method: "archive-string-scan",
+      source_location: "assets/config.txt",
     },
   ],
   categories: [{ name: "security", count: 1, max_severity: "high" }],
@@ -117,6 +121,13 @@ describe("HomePage", () => {
 
     expect(screen.getByText(/test.apk/)).toBeDefined();
     expect(screen.getByText(/72\/100/)).toBeDefined();
+    expect(
+      screen.getAllByText((_, element) => element?.textContent === "ANDROID-001 — Test finding").length
+    ).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Confidence heuristic")).toBeDefined();
+    expect(screen.getByText(/archive-string-scan/)).toBeDefined();
+    expect(screen.getByText(/assets\/config.txt/)).toBeDefined();
+    expect(screen.getByText(/hardcoded_url=https:\/\/staging.example.com/)).toBeDefined();
   });
 
   it("handles API error response", async () => {
@@ -139,5 +150,38 @@ describe("HomePage", () => {
     await waitFor(() => {
       expect(screen.getByText(/INVALID_FILE_TYPE/)).toBeDefined();
     });
+  });
+
+  it("shows analyzer failure details clearly", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      json: () =>
+        Promise.resolve({
+          error: {
+            code: "ANALYSIS_FAILED",
+            message: "Static analysis could not be completed safely",
+            details: {
+              stage: "android-analyzer",
+              tool: "jadx",
+              reason: "Analyzer raised an unexpected error",
+            },
+          },
+        }),
+    });
+
+    render(<HomePage />);
+
+    const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
+    fireEvent.change(getFileInput(), { target: { files: [file] } });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/ANALYSIS_FAILED/)).toBeDefined();
+    });
+
+    expect(screen.getByText(/static analysis did not complete safely/i)).toBeDefined();
+    expect(screen.getByText(/Failure stage: android-analyzer/)).toBeDefined();
+    expect(screen.getByText(/Tool: jadx/)).toBeDefined();
+    expect(screen.getByText(/Failure summary: Analyzer raised an unexpected error/)).toBeDefined();
   });
 });

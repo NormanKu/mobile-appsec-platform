@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 Severity = Literal["low", "medium", "high", "critical"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 Platform = Literal["android", "ios"]
+ConfidenceLevel = Literal["confirmed", "heuristic", "informational"]
 
 
 class Finding(BaseModel):
@@ -16,6 +17,10 @@ class Finding(BaseModel):
     description: str = Field(..., examples=["android:debuggable is true in release manifest"])
     recommendation: str = Field(..., examples=["Set android:debuggable=false for release builds"])
     source: str = Field(..., examples=["AndroidManifest.xml"])
+    confidence_level: ConfidenceLevel = Field(default="heuristic", examples=["confirmed"])
+    evidence: list[str] = Field(default_factory=list, examples=[['android:debuggable="true"']])
+    detection_method: str | None = Field(default=None, examples=["manifest-inspection"])
+    source_location: str | None = Field(default=None, examples=["AndroidManifest.xml"])
 
 
 class Summary(BaseModel):
@@ -84,6 +89,10 @@ ANDROID_EXAMPLE_REPORT: dict = {
             "description": "android:debuggable is true in release manifest",
             "recommendation": "Set android:debuggable=false for release builds",
             "source": "AndroidManifest.xml",
+            "confidence_level": "confirmed",
+            "evidence": ['android:debuggable="true"'],
+            "detection_method": "manifest-inspection",
+            "source_location": "AndroidManifest.xml",
         }
     ],
     "categories": [
@@ -119,6 +128,10 @@ IOS_EXAMPLE_REPORT: dict = {
             "description": "Access group is broader than required",
             "recommendation": "Restrict keychain access groups to least privilege",
             "source": "Payload/App.app/Info.plist",
+            "confidence_level": "heuristic",
+            "evidence": ["keychain-access-groups count=4"],
+            "detection_method": "entitlements-inspection",
+            "source_location": "Payload/App.app/archived-expanded-entitlements.xcent",
         }
     ],
     "categories": [

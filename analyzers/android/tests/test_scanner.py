@@ -1,6 +1,7 @@
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from analyzers.android.external_tools import AndroidExternalToolResult, AndroidExternalToolSignal
 from analyzers.android.scanner import analyze_android_package
 
 
@@ -42,6 +43,13 @@ def test_android_apk_analyzer_extracts_metadata_and_security_findings() -> None:
     assert "ANDROID-STRINGS-URL-001" in ids
     assert "ANDROID-STRINGS-SECRET-001" in ids
     assert all("source" in finding for finding in findings)
+    assert all("confidence_level" in finding for finding in findings)
+    assert all("evidence" in finding for finding in findings)
+    assert all("detection_method" in finding for finding in findings)
+    debug_finding = next(finding for finding in findings if finding["id"] == "ANDROID-MANIFEST-DBG-001")
+    assert debug_finding["confidence_level"] == "confirmed"
+    assert 'android:debuggable="true"' in debug_finding["evidence"]
+    assert debug_finding["detection_method"] == "manifest-inspection"
 
 
 def test_android_aab_supported() -> None:
@@ -102,3 +110,67 @@ def test_android_scanner_honors_custom_text_file_size_limit() -> None:
     assert "ANDROID-STRINGS-000" in ids
     assert "ANDROID-STRINGS-URL-001" not in ids
     assert "ANDROID-STRINGS-SECRET-001" not in ids
+
+
+def test_android_scanner_adds_jadx_enrichment_when_available(monkeypatch) -> None:
+    manifest = '<manifest package="com.example.jadx" xmlns:android="http://schemas.android.com/apk/res/android" />'
+    name, raw, ext = _build_android_archive(".apk", manifest, "noop")
+    tool_result = AndroidExternalToolResult(
+        tool_name="jadx",
+        available=True,
+        executed=True,
+        source_files_scanned=7,
+        signals=(
+            AndroidExternalToolSignal(
+                kind="readable_source",
+                value="com.example.internal.ApiClient",
+                location="sources/com/example/internal/ApiClient.java",
+            ),
+            AndroidExternalToolSignal(
+                kind="hardcoded_url",
+                value="https://staging.example.com/api",
+                location="sources/com/example/internal/ApiClient.java",
+            ),
+            AndroidExternalToolSignal(
+                kind="candidate_secret",
+                value="API_KEY=abcdef...",
+                location="sources/com/example/internal/TokenVault.kt",
+            ),
+            AndroidExternalToolSignal(
+                kind="naming_pattern",
+                value="com.example.internal.TokenVault",
+                location="sources/com/example/internal/TokenVault.kt",
+            ),
+        ),
+    )
+    monkeypatch.setattr("analyzers.android.scanner.analyze_with_jadx", lambda **_: tool_result)
+
+    findings = analyze_android_package(file_name=name, file_bytes=raw, file_extension=ext)
+    ids = {finding["id"] for finding in findings}
+    jadx_findings = [finding for finding in findings if finding["id"].startswith("ANDROID-JADX-")]
+
+    assert {
+        "ANDROID-JADX-CODE-001",
+        "ANDROID-JADX-URL-001",
+        "ANDROID-JADX-SECRET-001",
+        "ANDROID-JADX-NAME-001",
+    } <= ids
+    assert all(finding["title"].startswith("Heuristic:") for finding in jadx_findings)
+    assert all(finding["source"] == "jadx/source" for finding in jadx_findings)
+    assert all(finding["confidence_level"] == "heuristic" for finding in jadx_findings)
+    assert all(finding["detection_method"] == "jadx-source-analysis" for finding in jadx_findings)
+    assert all(finding["source_location"] for finding in jadx_findings)
+
+
+def test_android_scanner_gracefully_skips_unavailable_jadx(monkeypatch) -> None:
+    manifest = '<manifest package="com.example.nojadx" xmlns:android="http://schemas.android.com/apk/res/android" />'
+    name, raw, ext = _build_android_archive(".apk", manifest, "noop")
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx",
+        lambda **_: AndroidExternalToolResult(tool_name="jadx", available=False, executed=False),
+    )
+
+    findings = analyze_android_package(file_name=name, file_bytes=raw, file_extension=ext)
+
+    assert any(finding["id"] == "ANDROID-METADATA-001" for finding in findings)
+    assert all(not finding["id"].startswith("ANDROID-JADX-") for finding in findings)

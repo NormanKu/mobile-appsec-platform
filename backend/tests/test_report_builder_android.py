@@ -3,6 +3,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
+from analyzers.android.external_tools import AndroidExternalToolResult, AndroidExternalToolSignal
 from app.errors.exceptions import UploadValidationError
 from app.services.report_builder import build_normalized_report
 
@@ -41,7 +42,45 @@ def test_report_builder_routes_android_and_returns_extended_shape() -> None:
     )
     assert isinstance(payload["score"], int)
     assert all("source" in finding for finding in payload["findings"])
+    assert all("confidence_level" in finding for finding in payload["findings"])
+    assert all("evidence" in finding for finding in payload["findings"])
+    assert all("detection_method" in finding for finding in payload["findings"])
     assert sum(c["count"] for c in payload["categories"]) == payload["summary"]["total_findings"]
+
+
+def test_report_builder_routes_only_android_analyzer(monkeypatch) -> None:
+    called = {"android": False, "ios": False}
+
+    def fake_android_package(**_: object) -> list[dict[str, object]]:
+        called["android"] = True
+        return [
+            {
+                "id": "ANDROID-TEST-001",
+                "title": "Test analyzer finding",
+                "severity": "low",
+                "category": "analysis",
+                "description": "android analyzer route selected",
+                "recommendation": "noop",
+                "source": "android-test",
+            }
+        ]
+
+    def fake_ios_package(**_: object) -> list[dict[str, object]]:
+        called["ios"] = True
+        raise AssertionError("iOS analyzer should not be called for Android reports")
+
+    monkeypatch.setattr("app.services.report_builder.analyze_android_package", fake_android_package)
+    monkeypatch.setattr("app.services.report_builder.analyze_ios_package", fake_ios_package)
+
+    report = build_normalized_report(
+        file_name="sample.apk",
+        platform="android",
+        file_bytes=b"placeholder",
+        file_extension=".apk",
+    )
+
+    assert called == {"android": True, "ios": False}
+    assert report.platform == "android"
 
 
 def test_report_builder_raises_for_invalid_android_archive() -> None:
@@ -70,3 +109,118 @@ def test_report_builder_raises_for_android_archive_limit() -> None:
             max_zip_extracted_bytes=500,
         )
     assert exc_info.value.code == "ARCHIVE_LIMIT_EXCEEDED"
+
+
+def test_report_builder_preserves_shared_shape_with_jadx_enrichment(monkeypatch) -> None:
+    file_bytes, extension = _build_android_payload()
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx",
+        lambda **_: AndroidExternalToolResult(
+            tool_name="jadx",
+            available=True,
+            executed=True,
+            source_files_scanned=4,
+            signals=(
+                AndroidExternalToolSignal(
+                    kind="hardcoded_url",
+                    value="https://staging.example.com/api",
+                    location="sources/com/example/internal/ApiClient.java",
+                ),
+            ),
+        ),
+    )
+
+    report = build_normalized_report(
+        file_name="sample.apk",
+        platform="android",
+        file_bytes=file_bytes,
+        file_extension=extension,
+    )
+
+    payload = report.model_dump()
+    assert payload["summary"]["total_findings"] == len(payload["findings"])
+    jadx_finding = next(finding for finding in payload["findings"] if finding["id"] == "ANDROID-JADX-URL-001")
+    assert jadx_finding["confidence_level"] == "heuristic"
+    assert jadx_finding["detection_method"] == "jadx-source-analysis"
+    assert jadx_finding["source_location"] == "sources/com/example/internal/ApiClient.java"
+    assert payload["metadata"]["file_extension"] == ".apk"
+
+
+def test_report_builder_preserves_shape_when_jadx_is_unavailable(monkeypatch) -> None:
+    file_bytes, extension = _build_android_payload()
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx",
+        lambda **_: AndroidExternalToolResult(tool_name="jadx", available=False, executed=False),
+    )
+
+    report = build_normalized_report(
+        file_name="sample.apk",
+        platform="android",
+        file_bytes=file_bytes,
+        file_extension=extension,
+    )
+
+    payload = report.model_dump()
+    assert payload["summary"]["total_findings"] == len(payload["findings"])
+    assert all(not finding["id"].startswith("ANDROID-JADX-") for finding in payload["findings"])
+
+
+def test_report_builder_gracefully_falls_back_when_jadx_fails(monkeypatch) -> None:
+    file_bytes, extension = _build_android_payload()
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx",
+        lambda **_: AndroidExternalToolResult(
+            tool_name="jadx",
+            available=True,
+            executed=False,
+            error="jadx timed out",
+        ),
+    )
+
+    report = build_normalized_report(
+        file_name="sample.apk",
+        platform="android",
+        file_bytes=file_bytes,
+        file_extension=extension,
+    )
+
+    payload = report.model_dump()
+    assert payload["summary"]["total_findings"] == len(payload["findings"])
+    assert all(not finding["id"].startswith("ANDROID-JADX-") for finding in payload["findings"])
+
+
+def test_report_builder_wraps_android_analyzer_failures(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_android_package",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("android analyzer boom")),
+    )
+
+    with pytest.raises(UploadValidationError) as exc_info:
+        build_normalized_report(
+            file_name="sample.apk",
+            platform="android",
+            file_bytes=b"placeholder",
+            file_extension=".apk",
+        )
+
+    assert exc_info.value.code == "ANALYSIS_FAILED"
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.details["stage"] == "android-analyzer"
+
+
+def test_report_builder_wraps_malformed_android_output(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_android_package",
+        lambda **_: [{"id": "BROKEN-FINDING"}],
+    )
+
+    with pytest.raises(UploadValidationError) as exc_info:
+        build_normalized_report(
+            file_name="sample.apk",
+            platform="android",
+            file_bytes=b"placeholder",
+            file_extension=".apk",
+        )
+
+    assert exc_info.value.code == "ANALYSIS_FAILED"
+    assert exc_info.value.details["stage"] == "report-normalization"
