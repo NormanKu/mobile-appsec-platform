@@ -45,7 +45,9 @@ def test_android_scanner_returns_bomb_finding_on_limit_exceeded() -> None:
     from analyzers.android.scanner import analyze_android_package
 
     data = _make_zip_with_many_entries(6000)
-    findings = analyze_android_package(file_name="bomb.apk", file_bytes=data, file_extension=".apk")
+    findings = analyze_android_package(
+        file_name="bomb.apk", file_bytes=data, file_extension=".apk"
+    )
 
     assert findings[0]["id"] == "ANDROID-ARCHIVE-BOMB"
     assert findings[0]["severity"] == "critical"
@@ -55,7 +57,9 @@ def test_ios_scanner_returns_bomb_finding_on_limit_exceeded() -> None:
     from analyzers.ios.scanner import analyze_ios_package
 
     data = _make_zip_with_many_entries(6000)
-    findings = analyze_ios_package(file_name="bomb.ipa", file_bytes=data, file_extension=".ipa")
+    findings = analyze_ios_package(
+        file_name="bomb.ipa", file_bytes=data, file_extension=".ipa"
+    )
 
     assert findings[0]["id"] == "IOS-ARCHIVE-BOMB"
     assert findings[0]["severity"] == "critical"

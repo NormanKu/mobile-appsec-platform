@@ -27,24 +27,26 @@ def _assert_error_response(payload: dict, expected_code: str) -> None:
 
 
 def _build_apk_payload() -> bytes:
-    manifest = '''
+    manifest = """
     <manifest package="com.example.app" xmlns:android="http://schemas.android.com/apk/res/android">
       <application android:debuggable="true" />
     </manifest>
-    '''
+    """
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("AndroidManifest.xml", manifest)
-        archive.writestr("assets/config.txt", "token=mysecretvalue\nurl=https://api.example.com")
+        archive.writestr(
+            "assets/config.txt", "token=mysecretvalue\nurl=https://api.example.com"
+        )
     return buffer.getvalue()
 
 
 def _build_aab_payload() -> bytes:
-    manifest = '''
+    manifest = """
     <manifest package="com.example.bundle" xmlns:android="http://schemas.android.com/apk/res/android">
       <application android:debuggable="false" />
     </manifest>
-    '''
+    """
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("base/manifest/AndroidManifest.xml", manifest)
@@ -81,6 +83,7 @@ def test_schema_accepts_valid_android_report() -> None:
         summary={
             "total_findings": 1,
             "by_severity": {"low": 0, "medium": 0, "high": 1, "critical": 0},
+            "by_platform": {"android": 1, "ios": 0},
         },
         findings=[
             {
@@ -104,6 +107,21 @@ def test_schema_accepts_valid_android_report() -> None:
                 "max_severity": "high",
             }
         ],
+        top_risks=[
+            {
+                "id": "ANDROID-1",
+                "title": "Issue",
+                "severity": "high",
+                "category": "configuration",
+                "description": "desc",
+                "recommendation": "fix",
+                "source": "AndroidManifest.xml",
+                "confidence_level": "confirmed",
+                "evidence": ['android:debuggable="true"'],
+                "detection_method": "manifest-inspection",
+                "source_location": "AndroidManifest.xml",
+            }
+        ],
         metadata={
             "generated_at": datetime.now(timezone.utc),
             "analyzer_version": "0.1.0-mvp",
@@ -114,9 +132,14 @@ def test_schema_accepts_valid_android_report() -> None:
 
     assert report.platform == "android"
     assert report.score == 55
+    assert report.analysis_status == "complete"
+    assert report.warnings == []
+    assert report.errors == []
     assert report.summary.total_findings == 1
+    assert report.summary.by_platform == {"android": 1, "ios": 0}
     assert report.findings[0].confidence_level == "confirmed"
     assert report.findings[0].evidence == ['android:debuggable="true"']
+    assert report.top_risks[0].id == "ANDROID-1"
 
 
 def test_schema_keeps_new_finding_fields_backward_compatible() -> None:
@@ -159,6 +182,49 @@ def test_schema_keeps_new_finding_fields_backward_compatible() -> None:
     assert report.findings[0].evidence == []
     assert report.findings[0].detection_method is None
     assert report.findings[0].source_location is None
+    assert report.summary.by_platform == {}
+    assert report.top_risks == []
+    assert report.analysis_status == "complete"
+    assert report.warnings == []
+    assert report.errors == []
+
+
+def test_schema_accepts_analysis_diagnostics() -> None:
+    report = NormalizedAnalysisReport(
+        platform="android",
+        file_name="release.apk",
+        risk_level="low",
+        score=100,
+        analysis_status="warning",
+        summary={
+            "total_findings": 0,
+            "by_severity": {"low": 0, "medium": 0, "high": 0, "critical": 0},
+        },
+        findings=[],
+        categories=[],
+        warnings=[
+            {
+                "level": "warning",
+                "code": "ANDROID-JADX-SKIPPED",
+                "message": "JADX was unavailable",
+                "stage": "jadx-source-analysis",
+                "source": "jadx",
+                "tool": "jadx",
+                "recommendation": "Install JADX for code-level enrichment",
+                "details": {"available": False},
+            }
+        ],
+        metadata={
+            "generated_at": datetime.now(timezone.utc),
+            "analyzer_version": "0.1.0-mvp",
+            "analysis_mode": "static-placeholder",
+            "file_extension": ".apk",
+        },
+    )
+
+    assert report.analysis_status == "warning"
+    assert report.warnings[0].code == "ANDROID-JADX-SKIPPED"
+    assert report.errors == []
 
 
 def test_schema_rejects_invalid_confidence_level() -> None:
@@ -171,6 +237,7 @@ def test_schema_rejects_invalid_confidence_level() -> None:
             summary={
                 "total_findings": 1,
                 "by_severity": {"low": 0, "medium": 1, "high": 0, "critical": 0},
+                "by_platform": {"android": 0, "ios": 1},
             },
             findings=[
                 {
@@ -245,15 +312,37 @@ def test_schema_rejects_mismatched_category_count() -> None:
 def test_upload_endpoint_returns_extended_schema_for_apk() -> None:
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.apk", _build_apk_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["platform"] == "android"
-    assert {"platform", "file_name", "risk_level", "score", "summary", "findings", "categories", "metadata"}.issubset(payload.keys())
+    assert {
+        "platform",
+        "file_name",
+        "risk_level",
+        "score",
+        "analysis_status",
+        "summary",
+        "findings",
+        "categories",
+        "top_risks",
+        "warnings",
+        "errors",
+        "metadata",
+    }.issubset(payload.keys())
     assert payload["summary"]["total_findings"] == len(payload["findings"])
-    assert sum(category["count"] for category in payload["categories"]) == len(payload["findings"])
+    assert sum(category["count"] for category in payload["categories"]) == len(
+        payload["findings"]
+    )
+    assert payload["summary"]["by_platform"] == {
+        "android": len(payload["findings"]),
+        "ios": 0,
+    }
+    assert len(payload["top_risks"]) <= 3
     assert all("source" in finding for finding in payload["findings"])
     assert all("confidence_level" in finding for finding in payload["findings"])
     assert all("evidence" in finding for finding in payload["findings"])
@@ -263,26 +352,37 @@ def test_upload_endpoint_returns_extended_schema_for_apk() -> None:
 def test_upload_endpoint_returns_extended_schema_for_aab() -> None:
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.aab", _build_aab_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.aab", _build_aab_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["platform"] == "android"
     assert payload["metadata"]["file_extension"] == ".aab"
-    assert all(finding["id"] != "ANDROID-MANIFEST-404" for finding in payload["findings"])
+    assert all(
+        finding["id"] != "ANDROID-MANIFEST-404" for finding in payload["findings"]
+    )
 
 
 def test_upload_endpoint_returns_extended_schema_for_ipa() -> None:
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.ipa", _build_ipa_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.ipa", _build_ipa_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["platform"] == "ios"
     assert payload["metadata"]["file_extension"] == ".ipa"
+    assert payload["summary"]["by_platform"] == {
+        "android": 0,
+        "ios": len(payload["findings"]),
+    }
+    assert len(payload["top_risks"]) <= 3
     assert all("confidence_level" in finding for finding in payload["findings"])
 
 
@@ -303,7 +403,9 @@ def test_upload_endpoint_missing_file_returns_consistent_error() -> None:
     _assert_error_response(response.json(), "MISSING_FILE")
 
 
-def test_upload_endpoint_rejects_oversized_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_rejects_oversized_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "max_upload_size_bytes", 4)
 
     response = client.post(
@@ -375,7 +477,9 @@ def test_upload_endpoint_rejects_missing_ios_info_plist() -> None:
     assert payload["error"]["details"]["finding_id"] == "IOS-PLIST-404"
 
 
-def test_upload_endpoint_rejects_zip_archive_over_safe_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_rejects_zip_archive_over_safe_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "max_upload_size_bytes", 10_000)
     monkeypatch.setattr(settings, "max_zip_extracted_bytes", 500)
 
@@ -401,7 +505,9 @@ def test_upload_endpoint_rejects_zip_archive_over_safe_limit(monkeypatch: pytest
     assert payload["error"]["details"]["finding_id"] == "ANDROID-ARCHIVE-BOMB"
 
 
-def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "max_upload_size_bytes", 10_000)
     monkeypatch.setattr(settings, "max_zip_files", 1)
     monkeypatch.setattr(limiter, "enabled", False)
@@ -428,12 +534,16 @@ def test_upload_endpoint_rejects_zip_archive_over_custom_file_count_limit(monkey
     assert payload["error"]["details"]["finding_id"] == "ANDROID-ARCHIVE-BOMB"
 
 
-def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_honors_custom_text_scan_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "max_text_files_scanned", 1)
 
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.ipa", _build_ipa_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.ipa", _build_ipa_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 200
@@ -445,25 +555,35 @@ def test_upload_endpoint_honors_custom_text_scan_limit(monkeypatch: pytest.Monke
     assert "IOS-STRINGS-URL-002" not in ids
 
 
-def test_upload_endpoint_returns_report_when_jadx_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_returns_report_when_jadx_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from analyzers.android.external_tools import AndroidExternalToolResult
 
     monkeypatch.setattr(
         "analyzers.android.scanner.analyze_with_jadx",
-        lambda **_: AndroidExternalToolResult(tool_name="jadx", available=False, executed=False),
+        lambda **_: AndroidExternalToolResult(
+            tool_name="jadx", available=False, executed=False
+        ),
     )
 
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.apk", _build_apk_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert all(not finding["id"].startswith("ANDROID-JADX-") for finding in payload["findings"])
+    assert all(
+        not finding["id"].startswith("ANDROID-JADX-") for finding in payload["findings"]
+    )
 
 
-def test_upload_endpoint_returns_safe_error_when_android_analyzer_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_returns_safe_error_when_android_analyzer_crashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "app.services.report_builder.analyze_android_package",
         lambda **_: (_ for _ in ()).throw(RuntimeError("android analyzer boom")),
@@ -471,7 +591,9 @@ def test_upload_endpoint_returns_safe_error_when_android_analyzer_crashes(monkey
 
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.apk", _build_apk_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 500
@@ -481,7 +603,9 @@ def test_upload_endpoint_returns_safe_error_when_android_analyzer_crashes(monkey
     assert payload["error"]["details"]["platform"] == "android"
 
 
-def test_upload_endpoint_returns_safe_error_when_report_normalization_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_returns_safe_error_when_report_normalization_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "app.services.report_builder.analyze_android_package",
         lambda **_: [{"id": "BROKEN"}],
@@ -489,7 +613,9 @@ def test_upload_endpoint_returns_safe_error_when_report_normalization_breaks(mon
 
     response = client.post(
         "/api/v1/upload",
-        files={"file": ("sample.apk", _build_apk_payload(), "application/octet-stream")},
+        files={
+            "file": ("sample.apk", _build_apk_payload(), "application/octet-stream")
+        },
     )
 
     assert response.status_code == 500

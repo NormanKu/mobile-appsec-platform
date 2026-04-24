@@ -13,7 +13,9 @@ from .models import AndroidExternalToolResult, AndroidExternalToolSignal
 
 logger = logging.getLogger(__name__)
 PACKAGE_PATTERN = re.compile(r"^\s*package\s+([A-Za-z0-9_.]+)", re.MULTILINE)
-CLASS_PATTERN = re.compile(r"\b(class|interface|object|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
+CLASS_PATTERN = re.compile(
+    r"\b(class|interface|object|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
 
 DEFAULT_TIMEOUT_SECONDS = 45
 DEFAULT_MAX_SOURCE_FILES = 200
@@ -46,7 +48,11 @@ class JadxAdapter:
         max_source_files: int | None = None,
         max_source_file_size: int | None = None,
     ) -> None:
-        self.jadx_path = jadx_path if jadx_path is not None else os.getenv("APPSEC_ANDROID_JADX_PATH")
+        self.jadx_path = (
+            jadx_path
+            if jadx_path is not None
+            else os.getenv("APPSEC_ANDROID_JADX_PATH")
+        )
         self.timeout_seconds = timeout_seconds or _read_int_env(
             "APPSEC_ANDROID_JADX_TIMEOUT_SECONDS",
             DEFAULT_TIMEOUT_SECONDS,
@@ -60,11 +66,18 @@ class JadxAdapter:
             DEFAULT_MAX_SOURCE_FILE_SIZE,
         )
 
-    def analyze_apk(self, *, file_name: str, file_bytes: bytes) -> AndroidExternalToolResult:
+    def analyze_apk(
+        self, *, file_name: str, file_bytes: bytes
+    ) -> AndroidExternalToolResult:
         executable = self._resolve_executable()
         if not executable:
-            logger.info("JADX enrichment skipped for %s because jadx is not installed", file_name)
-            return AndroidExternalToolResult(tool_name="jadx", available=False, executed=False)
+            logger.info(
+                "JADX enrichment skipped for %s because jadx is not installed",
+                file_name,
+            )
+            return AndroidExternalToolResult(
+                tool_name="jadx", available=False, executed=False
+            )
 
         with TemporaryDirectory(prefix="jadx-") as temp_dir:
             working_dir = Path(temp_dir)
@@ -89,7 +102,11 @@ class JadxAdapter:
 
             if process.returncode != 0:
                 error_message = _summarize_process_error(process)
-                logger.warning("JADX returned non-zero exit code for %s: %s", file_name, error_message)
+                logger.warning(
+                    "JADX returned non-zero exit code for %s: %s",
+                    file_name,
+                    error_message,
+                )
                 return AndroidExternalToolResult(
                     tool_name="jadx",
                     available=True,
@@ -132,7 +149,9 @@ class JadxAdapter:
             timeout=self.timeout_seconds,
         )
 
-    def _collect_signals(self, output_dir: Path) -> tuple[tuple[AndroidExternalToolSignal, ...], int, int]:
+    def _collect_signals(
+        self, output_dir: Path
+    ) -> tuple[tuple[AndroidExternalToolSignal, ...], int, int]:
         collected: list[AndroidExternalToolSignal] = []
         seen: set[tuple[str, str]] = set()
         scanned_files = 0
@@ -164,7 +183,9 @@ class JadxAdapter:
             package_name = _extract_package_name(content)
             class_names = _extract_class_names(content)
 
-            for identifier in _extract_readable_identifiers(package_name, class_names, source_path):
+            for identifier in _extract_readable_identifiers(
+                package_name, class_names, source_path
+            ):
                 _append_signal(
                     collected,
                     seen,
@@ -193,7 +214,9 @@ class JadxAdapter:
                     location=relative_path,
                 )
 
-            for identifier in _extract_suspicious_identifiers(package_name, class_names):
+            for identifier in _extract_suspicious_identifiers(
+                package_name, class_names
+            ):
                 _append_signal(
                     collected,
                     seen,
@@ -237,7 +260,9 @@ def _append_signal(
         return
 
     seen.add(key)
-    collected.append(AndroidExternalToolSignal(kind=kind, value=value, location=location))
+    collected.append(
+        AndroidExternalToolSignal(kind=kind, value=value, location=location)
+    )
 
 
 def _extract_package_name(content: str) -> str | None:
@@ -271,14 +296,18 @@ def _extract_readable_identifiers(
     return []
 
 
-def _extract_suspicious_identifiers(package_name: str | None, class_names: list[str]) -> list[str]:
+def _extract_suspicious_identifiers(
+    package_name: str | None, class_names: list[str]
+) -> list[str]:
     identifiers: list[str] = []
     if package_name and _contains_suspicious_keyword(package_name):
         identifiers.append(package_name)
 
     for class_name in class_names:
         if _contains_suspicious_keyword(class_name):
-            identifiers.append(f"{package_name}.{class_name}" if package_name else class_name)
+            identifiers.append(
+                f"{package_name}.{class_name}" if package_name else class_name
+            )
 
     return identifiers
 

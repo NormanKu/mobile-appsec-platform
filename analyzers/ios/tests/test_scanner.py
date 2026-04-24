@@ -2,6 +2,7 @@ from io import BytesIO
 import plistlib
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from analyzers.ios import scanner as ios_scanner
 from analyzers.ios.scanner import analyze_ios_package
 
 
@@ -21,11 +22,18 @@ def _build_ipa(
     app_root = "Payload/Sample.app"
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         if info_plist is not None:
-            content = plistlib.dumps(info_plist) if isinstance(info_plist, dict) else info_plist
+            content = (
+                plistlib.dumps(info_plist)
+                if isinstance(info_plist, dict)
+                else info_plist
+            )
             archive.writestr(f"{app_root}/Info.plist", content)
 
         if entitlements is not None:
-            archive.writestr(f"{app_root}/archived-expanded-entitlements.xcent", plistlib.dumps(entitlements))
+            archive.writestr(
+                f"{app_root}/archived-expanded-entitlements.xcent",
+                plistlib.dumps(entitlements),
+            )
 
         if mobileprovision_entitlements is not None:
             archive.writestr(
@@ -39,7 +47,9 @@ def _build_ipa(
     return file_name, buffer.getvalue(), ".ipa"
 
 
-def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_findings() -> None:
+def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_findings() -> (
+    None
+):
     info_plist = {
         "CFBundleIdentifier": "com.example.ios",
         "CFBundleName": "Sample",
@@ -48,15 +58,23 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_finding
         "CFBundleVersion": "42",
         "CFBundleShortVersionString": "1.2.3",
         "MinimumOSVersion": "15.0",
+        "CFBundleURLTypes": [
+            {
+                "CFBundleURLName": "com.example.ios.auth",
+                "CFBundleURLSchemes": ["sampleapp", "auth", "demo"],
+            }
+        ],
         "UIFileSharingEnabled": True,
         "LSSupportsOpeningDocumentsInPlace": True,
         "NSAppTransportSecurity": {
             "NSAllowsArbitraryLoads": True,
             "NSAllowsArbitraryLoadsInWebContent": True,
+            "NSAllowsLocalNetworking": True,
             "NSExceptionDomains": {
                 "legacy.example.com": {
                     "NSExceptionAllowsInsecureHTTPLoads": True,
                     "NSExceptionMinimumTLSVersion": "TLSv1.0",
+                    "NSExceptionRequiresForwardSecrecy": False,
                 }
             },
         },
@@ -64,8 +82,12 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_finding
     }
     entitlements = {
         "get-task-allow": True,
-        "keychain-access-groups": [f"group{i}" for i in range(4)],
+        "keychain-access-groups": [f"group{i}" for i in range(4)] + ["ABCDE12345.*"],
         "com.apple.security.application-groups": [f"shared{i}" for i in range(4)],
+        "com.apple.developer.associated-domains": [
+            "applinks:example.com",
+            "applinks:*.internal.example.com",
+        ],
         "aps-environment": "development",
     }
     extra_entries = {
@@ -75,6 +97,8 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_finding
             "endpoint=https://api.example.com\n"
             "legacy=http://legacy.example.com\n"
             "staging=https://staging.example.com/api\n"
+            "api_host=staging.internal.example.com\n"
+            "local_endpoint=10.0.2.2:8080\n"
             "Authorization=Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature\n"
         ),
     }
@@ -84,25 +108,37 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_finding
         entitlements=entitlements,
     )
 
-    findings = analyze_ios_package(file_name=file_name, file_bytes=file_bytes, file_extension=ext)
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
     ids = {finding["id"] for finding in findings}
-    metadata = next(finding for finding in findings if finding["id"] == "IOS-METADATA-001")
+    metadata = next(
+        finding for finding in findings if finding["id"] == "IOS-METADATA-001"
+    )
 
     assert "IOS-METADATA-001" in ids
     assert "IOS-PLIST-ATS-001" in ids
     assert "IOS-PLIST-ATS-002" in ids
     assert "IOS-PLIST-ATS-003" in ids
     assert "IOS-PLIST-ATS-004" in ids
+    assert "IOS-PLIST-ATS-005" in ids
+    assert "IOS-PLIST-ATS-006" in ids
+    assert "IOS-PLIST-URL-001" in ids
+    assert "IOS-PLIST-URL-002" in ids
     assert "IOS-PLIST-QUERY-001" in ids
     assert "IOS-PLIST-FILE-001" in ids
     assert "IOS-PLIST-FILE-002" in ids
     assert "IOS-ENTITLEMENTS-DBG-001" in ids
     assert "IOS-ENTITLEMENTS-KEYCHAIN-001" in ids
+    assert "IOS-ENTITLEMENTS-KEYCHAIN-002" in ids
     assert "IOS-ENTITLEMENTS-GROUPS-001" in ids
+    assert "IOS-ENTITLEMENTS-LINKS-001" in ids
+    assert "IOS-ENTITLEMENTS-LINKS-002" in ids
     assert "IOS-ENTITLEMENTS-PUSH-001" in ids
     assert "IOS-STRINGS-URL-001" in ids
     assert "IOS-STRINGS-URL-002" in ids
     assert "IOS-STRINGS-URL-003" in ids
+    assert "IOS-STRINGS-ENDPOINT-001" in ids
     assert "IOS-STRINGS-SECRET-001" in ids
     assert "IOS-STRINGS-TOKEN-001" in ids
     assert "payload_app_path=Payload/Sample.app" in metadata["description"]
@@ -115,13 +151,25 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_entitlement_and_string_finding
     assert all("confidence_level" in finding for finding in findings)
     assert all("evidence" in finding for finding in findings)
     assert all("detection_method" in finding for finding in findings)
-    ats_finding = next(finding for finding in findings if finding["id"] == "IOS-PLIST-ATS-001")
+    ats_finding = next(
+        finding for finding in findings if finding["id"] == "IOS-PLIST-ATS-001"
+    )
     assert ats_finding["confidence_level"] == "confirmed"
     assert "NSAllowsArbitraryLoads=true" in ats_finding["evidence"]
     assert ats_finding["detection_method"] == "info-plist-inspection"
+    local_networking_finding = next(
+        finding for finding in findings if finding["id"] == "IOS-PLIST-ATS-005"
+    )
+    assert "NSAllowsLocalNetworking=true" in local_networking_finding["evidence"]
+    url_scheme_finding = next(
+        finding for finding in findings if finding["id"] == "IOS-PLIST-URL-001"
+    )
+    assert "sampleapp" in url_scheme_finding["evidence"]
 
 
-def test_ios_ipa_uses_mobileprovision_entitlements_when_bundle_entitlements_missing() -> None:
+def test_ios_ipa_uses_mobileprovision_entitlements_when_bundle_entitlements_missing() -> (
+    None
+):
     info_plist = {
         "CFBundleIdentifier": "com.example.ios",
         "CFBundleExecutable": "Sample",
@@ -136,24 +184,37 @@ def test_ios_ipa_uses_mobileprovision_entitlements_when_bundle_entitlements_miss
         mobileprovision_entitlements={"get-task-allow": True},
     )
 
-    findings = analyze_ios_package(file_name=file_name, file_bytes=file_bytes, file_extension=ext)
-    metadata = next(finding for finding in findings if finding["id"] == "IOS-METADATA-001")
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
+    metadata = next(
+        finding for finding in findings if finding["id"] == "IOS-METADATA-001"
+    )
 
     assert "entitlements_source=embedded-mobileprovision" in metadata["description"]
     assert any(finding["id"] == "IOS-ENTITLEMENTS-DBG-001" for finding in findings)
-    debug_finding = next(finding for finding in findings if finding["id"] == "IOS-ENTITLEMENTS-DBG-001")
-    assert debug_finding["source_location"] == "Payload/Sample.app/embedded.mobileprovision"
+    debug_finding = next(
+        finding for finding in findings if finding["id"] == "IOS-ENTITLEMENTS-DBG-001"
+    )
+    assert (
+        debug_finding["source_location"]
+        == "Payload/Sample.app/embedded.mobileprovision"
+    )
 
 
 def test_ios_requires_ipa_extension() -> None:
-    findings = analyze_ios_package(file_name="sample.zip", file_bytes=b"PK\x03\x04", file_extension=".zip")
+    findings = analyze_ios_package(
+        file_name="sample.zip", file_bytes=b"PK\x03\x04", file_extension=".zip"
+    )
 
     assert findings[0]["id"] == "IOS-FORMAT-001"
     assert findings[0]["title"].startswith("Confirmed:")
 
 
 def test_invalid_ipa_returns_critical_finding() -> None:
-    findings = analyze_ios_package(file_name="bad.ipa", file_bytes=b"not-a-zip", file_extension=".ipa")
+    findings = analyze_ios_package(
+        file_name="bad.ipa", file_bytes=b"not-a-zip", file_extension=".ipa"
+    )
 
     assert findings[0]["id"] == "IOS-ARCHIVE-001"
     assert findings[0]["severity"] == "critical"
@@ -165,15 +226,52 @@ def test_ios_scanner_reports_missing_info_plist_and_payload_fallbacks() -> None:
         extra_entries={"Payload/Sample.app/config.txt": "noop"},
     )
 
-    findings = analyze_ios_package(file_name=file_name, file_bytes=file_bytes, file_extension=ext)
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
     ids = {finding["id"] for finding in findings}
 
     assert "IOS-PLIST-404" in ids
     assert "IOS-METADATA-001" in ids
 
 
+def test_ios_scanner_isolates_info_plist_step_failure(monkeypatch) -> None:
+    info_plist = {
+        "CFBundleIdentifier": "com.example.partial",
+        "CFBundleExecutable": "Sample",
+    }
+    file_name, file_bytes, ext = _build_ipa(
+        info_plist=info_plist,
+        extra_entries={
+            "Payload/Sample.app/Sample": b"\xcf\xfa\xed\xfe",
+            "Payload/Sample.app/config.txt": "url=https://api.example.com",
+        },
+    )
+
+    def fail_info_plist_step(**_: object) -> list[dict[str, object]]:
+        raise RuntimeError("plist step boom")
+
+    monkeypatch.setattr(ios_scanner, "_inspect_info_plist", fail_info_plist_step)
+
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
+    ids = {finding["id"] for finding in findings}
+    diagnostic = next(
+        finding for finding in findings if finding["id"] == "IOS-PLIST-WARN-001"
+    )
+
+    assert "IOS-METADATA-001" in ids
+    assert "IOS-STRINGS-URL-001" in ids
+    assert diagnostic["diagnostic_level"] == "warning"
+    assert diagnostic["diagnostic_details"]["reason"] == "plist step boom"
+
+
 def test_ios_scanner_honors_custom_zip_limit() -> None:
-    info_plist = {"CFBundleIdentifier": "com.example.limit", "CFBundleExecutable": "Sample"}
+    info_plist = {
+        "CFBundleIdentifier": "com.example.limit",
+        "CFBundleExecutable": "Sample",
+    }
     file_name, file_bytes, ext = _build_ipa(
         info_plist=info_plist,
         extra_entries={
@@ -193,7 +291,10 @@ def test_ios_scanner_honors_custom_zip_limit() -> None:
 
 
 def test_ios_scanner_honors_custom_text_file_size_limit() -> None:
-    info_plist = {"CFBundleIdentifier": "com.example.limit", "CFBundleExecutable": "Sample"}
+    info_plist = {
+        "CFBundleIdentifier": "com.example.limit",
+        "CFBundleExecutable": "Sample",
+    }
     file_name, file_bytes, ext = _build_ipa(
         info_plist=info_plist,
         extra_entries={
@@ -233,8 +334,38 @@ def test_ios_scanner_gracefully_handles_missing_entitlements() -> None:
         },
     )
 
-    findings = analyze_ios_package(file_name=file_name, file_bytes=file_bytes, file_extension=ext)
-    metadata = next(finding for finding in findings if finding["id"] == "IOS-METADATA-001")
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
+    metadata = next(
+        finding for finding in findings if finding["id"] == "IOS-METADATA-001"
+    )
 
     assert "entitlements_path=missing" in metadata["description"]
-    assert all(not finding["id"].startswith("IOS-ENTITLEMENTS-") for finding in findings)
+    assert all(
+        not finding["id"].startswith("IOS-ENTITLEMENTS-") for finding in findings
+    )
+
+
+def test_ios_scanner_detects_endpoint_assignments_without_explicit_url_scheme() -> None:
+    info_plist = {
+        "CFBundleIdentifier": "com.example.endpoints",
+        "CFBundleExecutable": "Sample",
+    }
+    file_name, file_bytes, ext = _build_ipa(
+        info_plist=info_plist,
+        extra_entries={
+            "Payload/Sample.app/Sample": b"\xcf\xfa\xed\xfe",
+            "Payload/Sample.app/config.txt": (
+                "api_host=staging.internal.example.com\nfallback_server=10.0.2.2:8080\n"
+            ),
+        },
+    )
+
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
+    ids = {finding["id"] for finding in findings}
+
+    assert "IOS-STRINGS-ENDPOINT-001" in ids
+    assert "IOS-STRINGS-URL-003" in ids

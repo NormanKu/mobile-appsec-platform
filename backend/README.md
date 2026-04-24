@@ -13,6 +13,25 @@ Endpoints:
 
 - `GET /health`
 - `POST /api/v1/upload` (multipart form field: `file`, supports `.apk`, `.aab`, `.ipa`)
+- `POST /api/v1/scans` (multipart form field: `file`, starts a lightweight async scan job)
+- `GET /api/v1/scans/{job_id}` (poll scan job status and completed report)
+
+## Lightweight Async Scan Jobs
+
+`POST /api/v1/scans` returns `202 Accepted` with a local scan job identifier. Poll
+`GET /api/v1/scans/{job_id}` until the job reaches `completed` or `failed`.
+Completed jobs include the same normalized report schema returned by
+`POST /api/v1/upload`.
+
+The async workflow is intentionally process-local for the second phase MVP. It
+uses an in-memory store and a small thread pool, so jobs are lost on backend
+restart and are not shared across multiple backend processes.
+
+Async jobs request partial reports from the report builder. If an optional tool
+or analyzer step fails, the completed report can include `analysis_status`,
+`warnings`, and `errors` so callers can distinguish a complete scan from a
+partial or warning-only analysis. The legacy synchronous upload endpoint keeps
+strict validation behavior for malformed archives.
 
 ## Optional JADX Enrichment for Android APKs
 
@@ -50,9 +69,12 @@ export APPSEC_ANDROID_JADX_MAX_SOURCE_FILE_SIZE=300000
 - `file_name`
 - `risk_level`
 - `score`
+- `analysis_status`
 - `summary`
 - `findings`
 - `categories`
+- `warnings`
+- `errors`
 - `metadata`
 
 See `backend/app/models/report.py` for typed models and example Android/iOS response objects.

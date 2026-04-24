@@ -6,7 +6,10 @@ from io import BytesIO
 import re
 from zipfile import BadZipFile, ZipFile
 
-from analyzers.android.external_tools import AndroidExternalToolResult, analyze_with_jadx
+from analyzers.android.external_tools import (
+    AndroidExternalToolResult,
+    analyze_with_jadx,
+)
 from analyzers.patterns import URL_PATTERN, SECRET_PATTERN
 from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
 
@@ -79,20 +82,89 @@ def analyze_android_package(
             if max_files is not None:
                 zip_limit_kwargs["max_files"] = max_files
             validate_zip_limits(archive, **zip_limit_kwargs)
-            metadata = _extract_basic_metadata(extension=extension, archive=archive, file_bytes=file_bytes)
-            findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
-            findings.extend(_inspect_manifest(archive=archive, metadata=metadata))
-            findings.extend(
-                _scan_archive_strings(
-                    archive=archive,
-                    max_text_file_size=MAX_TEXT_FILE_SIZE if max_text_file_size is None else max_text_file_size,
-                    max_text_files_scanned=(
-                        MAX_TEXT_FILES_SCANNED if max_text_files_scanned is None else max_text_files_scanned
-                    ),
+            findings: list[dict[str, object]] = []
+            metadata: AndroidPackageMetadata | None = None
+
+            try:
+                metadata = _extract_basic_metadata(
+                    extension=extension, archive=archive, file_bytes=file_bytes
                 )
-            )
+                findings.extend(
+                    _build_metadata_findings(file_name=file_name, metadata=metadata)
+                )
+            except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                logger.warning(
+                    "Android metadata inspection failed for %s: %s", file_name, exc
+                )
+                findings.append(
+                    _build_diagnostic_finding(
+                        code="ANDROID-METADATA-WARN-001",
+                        title="Android metadata inspection failed",
+                        message="Android package metadata could not be fully extracted",
+                        stage="archive-metadata-inspection",
+                        source="archive/metadata",
+                        recommendation="Review archive structure and retry with a package produced by the normal release build",
+                        details={"reason": str(exc)},
+                    )
+                )
+
+            if metadata is not None:
+                try:
+                    findings.extend(
+                        _inspect_manifest(archive=archive, metadata=metadata)
+                    )
+                except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                    logger.warning(
+                        "Android manifest inspection failed for %s: %s", file_name, exc
+                    )
+                    findings.append(
+                        _build_diagnostic_finding(
+                            code="ANDROID-MANIFEST-WARN-001",
+                            title="Android manifest inspection failed",
+                            message="AndroidManifest.xml checks could not be fully completed",
+                            stage="manifest-inspection",
+                            source=metadata.manifest_path or "archive/manifest",
+                            recommendation="Validate the manifest encoding and rerun analysis before relying on manifest-specific results",
+                            details={"reason": str(exc)},
+                        )
+                    )
+
+            try:
+                findings.extend(
+                    _scan_archive_strings(
+                        archive=archive,
+                        max_text_file_size=MAX_TEXT_FILE_SIZE
+                        if max_text_file_size is None
+                        else max_text_file_size,
+                        max_text_files_scanned=(
+                            MAX_TEXT_FILES_SCANNED
+                            if max_text_files_scanned is None
+                            else max_text_files_scanned
+                        ),
+                    )
+                )
+            except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                logger.warning(
+                    "Android archive string scan failed for %s: %s", file_name, exc
+                )
+                findings.append(
+                    _build_diagnostic_finding(
+                        code="ANDROID-STRINGS-WARN-001",
+                        title="Android string scan failed",
+                        message="Archive string inspection could not be fully completed",
+                        stage="archive-string-scan",
+                        source="archive/strings",
+                        recommendation="Review package readability and rerun analysis before relying on URL or secret detection results",
+                        details={"reason": str(exc)},
+                    )
+                )
+
             if extension == ".apk":
-                findings.extend(_scan_external_android_tools(file_name=file_name, file_bytes=file_bytes))
+                findings.extend(
+                    _scan_external_android_tools(
+                        file_name=file_name, file_bytes=file_bytes
+                    )
+                )
             return _finalize_findings(findings)
     except ZipExtractionLimitExceeded as exc:
         return _finalize_findings(
@@ -124,7 +196,9 @@ def analyze_android_package(
         )
 
 
-def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes) -> AndroidPackageMetadata:
+def _extract_basic_metadata(
+    extension: str, archive: ZipFile, file_bytes: bytes
+) -> AndroidPackageMetadata:
     names = archive.namelist()
     manifest_path = _resolve_manifest_path(extension=extension, names=names)
     manifest_present = manifest_path is not None
@@ -154,7 +228,9 @@ def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes)
     )
 
 
-def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
+def _build_metadata_findings(
+    file_name: str, metadata: AndroidPackageMetadata
+) -> list[dict[str, str]]:
     details = [
         f"package_type={metadata.package_type}",
         f"archive_size_bytes={metadata.archive_size_bytes}",
@@ -210,8 +286,14 @@ def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -
     return findings
 
 
-def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
-    if not metadata.manifest_present or not metadata.manifest_decodable or not metadata.manifest_path:
+def _inspect_manifest(
+    archive: ZipFile, metadata: AndroidPackageMetadata
+) -> list[dict[str, str]]:
+    if (
+        not metadata.manifest_present
+        or not metadata.manifest_decodable
+        or not metadata.manifest_path
+    ):
         return []
 
     manifest = archive.read(metadata.manifest_path).decode("utf-8")
@@ -243,7 +325,6 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
             }
         )
 
-
     if 'android:allowBackup="true"' in manifest:
         findings.append(
             {
@@ -259,8 +340,8 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
 
     if (
         'android:allowBackup="true"' in manifest
-        and 'android:fullBackupContent=' not in manifest
-        and 'android:dataExtractionRules=' not in manifest
+        and "android:fullBackupContent=" not in manifest
+        and "android:dataExtractionRules=" not in manifest
     ):
         findings.append(
             {
@@ -304,7 +385,11 @@ def _scan_archive_strings(
             continue
 
         file_name = entry.filename
-        if not _looks_like_text(file_name=file_name, size=entry.file_size, max_text_file_size=max_text_file_size):
+        if not _looks_like_text(
+            file_name=file_name,
+            size=entry.file_size,
+            max_text_file_size=max_text_file_size,
+        ):
             continue
 
         scanned_files += 1
@@ -365,7 +450,9 @@ def _scan_archive_strings(
     return findings
 
 
-def _looks_like_text(file_name: str, size: int, max_text_file_size: int = MAX_TEXT_FILE_SIZE) -> bool:
+def _looks_like_text(
+    file_name: str, size: int, max_text_file_size: int = MAX_TEXT_FILE_SIZE
+) -> bool:
     if size <= 0 or size > max_text_file_size:
         return False
 
@@ -393,14 +480,62 @@ def _resolve_manifest_path(extension: str, names: list[str]) -> str | None:
     return None
 
 
-def _scan_external_android_tools(file_name: str, file_bytes: bytes) -> list[dict[str, str]]:
-    tool_result = analyze_with_jadx(file_name=file_name, file_bytes=file_bytes)
+def _scan_external_android_tools(
+    file_name: str, file_bytes: bytes
+) -> list[dict[str, str]]:
+    try:
+        tool_result = analyze_with_jadx(file_name=file_name, file_bytes=file_bytes)
+    except Exception as exc:
+        logger.warning("JADX enrichment raised unexpectedly for %s: %s", file_name, exc)
+        return [
+            _build_diagnostic_finding(
+                code="ANDROID-JADX-FAILED",
+                title="JADX enrichment failed",
+                message="JADX code enrichment raised an unexpected error",
+                stage="jadx-source-analysis",
+                source="jadx",
+                recommendation="Review JADX installation and analyzer logs, then rerun analysis if code-level Android checks are required",
+                tool="jadx",
+                details={"reason": str(exc)},
+            )
+        ]
     return _build_jadx_findings(tool_result)
 
 
-def _build_jadx_findings(tool_result: AndroidExternalToolResult) -> list[dict[str, str]]:
-    if not tool_result.available or not tool_result.executed:
-        return []
+def _build_jadx_findings(
+    tool_result: AndroidExternalToolResult,
+) -> list[dict[str, str]]:
+    if not tool_result.available:
+        return [
+            _build_diagnostic_finding(
+                code="ANDROID-JADX-SKIPPED",
+                title="JADX enrichment skipped",
+                message="JADX was not available, so Android code-level enrichment was skipped",
+                stage="jadx-source-analysis",
+                source="jadx",
+                recommendation="Install and configure JADX to enable Android code-level heuristics",
+                tool="jadx",
+                details={"available": False, "executed": False},
+            )
+        ]
+
+    if not tool_result.executed:
+        return [
+            _build_diagnostic_finding(
+                code="ANDROID-JADX-FAILED",
+                title="JADX enrichment failed",
+                message="JADX was available but did not complete successfully",
+                stage="jadx-source-analysis",
+                source="jadx",
+                recommendation="Review the JADX error and rerun analysis if code-level Android checks are required",
+                tool="jadx",
+                details={
+                    "available": True,
+                    "executed": False,
+                    "error": tool_result.error or "unknown error",
+                },
+            )
+        ]
 
     grouped = _group_external_tool_values(tool_result)
     findings: list[dict[str, str]] = []
@@ -424,7 +559,9 @@ def _build_jadx_findings(tool_result: AndroidExternalToolResult) -> list[dict[st
                 "source": "jadx/source",
                 "evidence": readable_source[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
                 "detection_method": "jadx-source-analysis",
-                "source_location": _first_signal_location(tool_result, "readable_source"),
+                "source_location": _first_signal_location(
+                    tool_result, "readable_source"
+                ),
             }
         )
 
@@ -466,7 +603,9 @@ def _build_jadx_findings(tool_result: AndroidExternalToolResult) -> list[dict[st
                 "source": "jadx/source",
                 "evidence": candidate_secrets[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
                 "detection_method": "jadx-source-analysis",
-                "source_location": _first_signal_location(tool_result, "candidate_secret"),
+                "source_location": _first_signal_location(
+                    tool_result, "candidate_secret"
+                ),
             }
         )
 
@@ -487,14 +626,50 @@ def _build_jadx_findings(tool_result: AndroidExternalToolResult) -> list[dict[st
                 "source": "jadx/source",
                 "evidence": naming_patterns[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES],
                 "detection_method": "jadx-source-analysis",
-                "source_location": _first_signal_location(tool_result, "naming_pattern"),
+                "source_location": _first_signal_location(
+                    tool_result, "naming_pattern"
+                ),
             }
         )
 
     return findings
 
 
-def _group_external_tool_values(tool_result: AndroidExternalToolResult) -> dict[str, list[str]]:
+def _build_diagnostic_finding(
+    *,
+    code: str,
+    title: str,
+    message: str,
+    stage: str,
+    source: str,
+    recommendation: str,
+    tool: str | None = None,
+    details: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": code,
+        "title": title,
+        "severity": "low",
+        "category": "analysis-warning",
+        "description": message,
+        "recommendation": recommendation,
+        "source": source,
+        "confidence_level": "informational",
+        "evidence": [message],
+        "detection_method": stage,
+        "source_location": None,
+        "diagnostic_level": "warning",
+        "diagnostic_code": code,
+        "diagnostic_message": message,
+        "diagnostic_stage": stage,
+        "diagnostic_tool": tool,
+        "diagnostic_details": details or {},
+    }
+
+
+def _group_external_tool_values(
+    tool_result: AndroidExternalToolResult,
+) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {}
     for signal in tool_result.signals:
         values = grouped.setdefault(signal.kind, [])
@@ -504,7 +679,9 @@ def _group_external_tool_values(tool_result: AndroidExternalToolResult) -> dict[
     return grouped
 
 
-def _first_signal_location(tool_result: AndroidExternalToolResult, kind: str) -> str | None:
+def _first_signal_location(
+    tool_result: AndroidExternalToolResult, kind: str
+) -> str | None:
     for signal in tool_result.signals:
         if signal.kind == kind:
             return signal.location
@@ -523,9 +700,15 @@ def _finalize_findings(findings: list[dict[str, object]]) -> list[dict[str, obje
 
 
 def _infer_confidence_level(finding_id: str) -> str:
-    if finding_id in {"ANDROID-METADATA-001", "ANDROID-STRINGS-000", "ANDROID-MANIFEST-002"}:
+    if finding_id in {
+        "ANDROID-METADATA-001",
+        "ANDROID-STRINGS-000",
+        "ANDROID-MANIFEST-002",
+    }:
         return "informational"
-    if finding_id.startswith("ANDROID-STRINGS") or finding_id.startswith("ANDROID-JADX"):
+    if finding_id.startswith("ANDROID-STRINGS") or finding_id.startswith(
+        "ANDROID-JADX"
+    ):
         return "heuristic"
     if finding_id in {"ANDROID-MANIFEST-BACKUP-001", "ANDROID-MANIFEST-BACKUP-002"}:
         return "heuristic"
@@ -549,7 +732,11 @@ def _infer_detection_method(finding_id: str) -> str:
 
 
 def _infer_source_location(source: str) -> str | None:
-    return None if source.startswith("archive/") or source == "upload/extension" else source
+    return (
+        None
+        if source.startswith("archive/") or source == "upload/extension"
+        else source
+    )
 
 
 def _infer_evidence(finding: dict[str, object]) -> list[str]:
@@ -574,10 +761,14 @@ def _infer_evidence(finding: dict[str, object]) -> list[str]:
         return explicit_evidence[finding_id]
 
     if finding_id == "ANDROID-METADATA-001":
-        return description.split(": ", 1)[-1].split(", ")[:MAX_EXTERNAL_TOOL_SAMPLE_VALUES]
+        return description.split(": ", 1)[-1].split(", ")[
+            :MAX_EXTERNAL_TOOL_SAMPLE_VALUES
+        ]
 
     if "sample: " in description:
         sample = description.split("sample: ", 1)[1]
-        return [item.strip() for item in sample.split(", ") if item.strip()][:MAX_EXTERNAL_TOOL_SAMPLE_VALUES]
+        return [item.strip() for item in sample.split(", ") if item.strip()][
+            :MAX_EXTERNAL_TOOL_SAMPLE_VALUES
+        ]
 
     return []

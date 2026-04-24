@@ -1,7 +1,10 @@
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from analyzers.android.external_tools import AndroidExternalToolResult, AndroidExternalToolSignal
+from analyzers.android.external_tools import (
+    AndroidExternalToolResult,
+    AndroidExternalToolSignal,
+)
 from analyzers.android.scanner import analyze_android_package
 
 
@@ -21,17 +24,19 @@ def _build_android_archive(
 
 
 def test_android_apk_analyzer_extracts_metadata_and_security_findings() -> None:
-    manifest = '''
+    manifest = """
     <manifest package="com.example.app" android:versionName="1.2.3" android:versionCode="12"
       xmlns:android="http://schemas.android.com/apk/res/android">
       <application android:debuggable="true" android:usesCleartextTraffic="true" android:allowBackup="true" />
       <activity android:name=".MainActivity" android:exported="true" />
     </manifest>
-    '''
+    """
     strings = "API_KEY=abcd1234SECRET\nendpoint=https://api.example.com/v1"
     name, raw, ext = _build_android_archive(".apk", manifest, strings)
 
-    findings = analyze_android_package(file_name=name, file_bytes=raw, file_extension=ext)
+    findings = analyze_android_package(
+        file_name=name, file_bytes=raw, file_extension=ext
+    )
     ids = {finding["id"] for finding in findings}
 
     assert "ANDROID-METADATA-001" in ids
@@ -46,7 +51,9 @@ def test_android_apk_analyzer_extracts_metadata_and_security_findings() -> None:
     assert all("confidence_level" in finding for finding in findings)
     assert all("evidence" in finding for finding in findings)
     assert all("detection_method" in finding for finding in findings)
-    debug_finding = next(finding for finding in findings if finding["id"] == "ANDROID-MANIFEST-DBG-001")
+    debug_finding = next(
+        finding for finding in findings if finding["id"] == "ANDROID-MANIFEST-DBG-001"
+    )
     assert debug_finding["confidence_level"] == "confirmed"
     assert 'android:debuggable="true"' in debug_finding["evidence"]
     assert debug_finding["detection_method"] == "manifest-inspection"
@@ -61,7 +68,9 @@ def test_android_aab_supported() -> None:
         manifest_path="base/manifest/AndroidManifest.xml",
     )
 
-    findings = analyze_android_package(file_name=name, file_bytes=raw, file_extension=ext)
+    findings = analyze_android_package(
+        file_name=name, file_bytes=raw, file_extension=ext
+    )
     ids = {finding["id"] for finding in findings}
     metadata = next(f for f in findings if f["id"] == "ANDROID-METADATA-001")
 
@@ -97,7 +106,9 @@ def test_android_scanner_honors_custom_zip_limit() -> None:
 
 def test_android_scanner_honors_custom_text_file_size_limit() -> None:
     manifest = '<manifest package="com.example.limit" xmlns:android="http://schemas.android.com/apk/res/android" />'
-    name, raw, ext = _build_android_archive(".apk", manifest, "token=mysecretvalue\nurl=https://api.example.com")
+    name, raw, ext = _build_android_archive(
+        ".apk", manifest, "token=mysecretvalue\nurl=https://api.example.com"
+    )
 
     findings = analyze_android_package(
         file_name=name,
@@ -143,11 +154,17 @@ def test_android_scanner_adds_jadx_enrichment_when_available(monkeypatch) -> Non
             ),
         ),
     )
-    monkeypatch.setattr("analyzers.android.scanner.analyze_with_jadx", lambda **_: tool_result)
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx", lambda **_: tool_result
+    )
 
-    findings = analyze_android_package(file_name=name, file_bytes=raw, file_extension=ext)
+    findings = analyze_android_package(
+        file_name=name, file_bytes=raw, file_extension=ext
+    )
     ids = {finding["id"] for finding in findings}
-    jadx_findings = [finding for finding in findings if finding["id"].startswith("ANDROID-JADX-")]
+    jadx_findings = [
+        finding for finding in findings if finding["id"].startswith("ANDROID-JADX-")
+    ]
 
     assert {
         "ANDROID-JADX-CODE-001",
@@ -158,7 +175,10 @@ def test_android_scanner_adds_jadx_enrichment_when_available(monkeypatch) -> Non
     assert all(finding["title"].startswith("Heuristic:") for finding in jadx_findings)
     assert all(finding["source"] == "jadx/source" for finding in jadx_findings)
     assert all(finding["confidence_level"] == "heuristic" for finding in jadx_findings)
-    assert all(finding["detection_method"] == "jadx-source-analysis" for finding in jadx_findings)
+    assert all(
+        finding["detection_method"] == "jadx-source-analysis"
+        for finding in jadx_findings
+    )
     assert all(finding["source_location"] for finding in jadx_findings)
 
 
@@ -167,10 +187,42 @@ def test_android_scanner_gracefully_skips_unavailable_jadx(monkeypatch) -> None:
     name, raw, ext = _build_android_archive(".apk", manifest, "noop")
     monkeypatch.setattr(
         "analyzers.android.scanner.analyze_with_jadx",
-        lambda **_: AndroidExternalToolResult(tool_name="jadx", available=False, executed=False),
+        lambda **_: AndroidExternalToolResult(
+            tool_name="jadx", available=False, executed=False
+        ),
     )
 
-    findings = analyze_android_package(file_name=name, file_bytes=raw, file_extension=ext)
+    findings = analyze_android_package(
+        file_name=name, file_bytes=raw, file_extension=ext
+    )
 
     assert any(finding["id"] == "ANDROID-METADATA-001" for finding in findings)
-    assert all(not finding["id"].startswith("ANDROID-JADX-") for finding in findings)
+    diagnostic = next(
+        finding for finding in findings if finding["id"] == "ANDROID-JADX-SKIPPED"
+    )
+    assert diagnostic["diagnostic_level"] == "warning"
+    assert diagnostic["diagnostic_tool"] == "jadx"
+
+
+def test_android_scanner_reports_jadx_execution_failure_as_warning(monkeypatch) -> None:
+    manifest = '<manifest package="com.example.jadxfail" xmlns:android="http://schemas.android.com/apk/res/android" />'
+    name, raw, ext = _build_android_archive(".apk", manifest, "noop")
+    monkeypatch.setattr(
+        "analyzers.android.scanner.analyze_with_jadx",
+        lambda **_: AndroidExternalToolResult(
+            tool_name="jadx",
+            available=True,
+            executed=False,
+            error="jadx timed out",
+        ),
+    )
+
+    findings = analyze_android_package(
+        file_name=name, file_bytes=raw, file_extension=ext
+    )
+    diagnostic = next(
+        finding for finding in findings if finding["id"] == "ANDROID-JADX-FAILED"
+    )
+
+    assert diagnostic["diagnostic_level"] == "warning"
+    assert diagnostic["diagnostic_details"]["error"] == "jadx timed out"

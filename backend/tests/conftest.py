@@ -1,4 +1,5 @@
 """Make backend/app importable when running pytest from repo root."""
+
 import sys
 from pathlib import Path
 

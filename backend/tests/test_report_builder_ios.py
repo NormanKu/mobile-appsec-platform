@@ -47,9 +47,17 @@ def test_report_builder_routes_ios_and_returns_extended_shape() -> None:
     payload = report.model_dump()
     assert payload["platform"] == "ios"
     assert payload["file_name"] == "sample.ipa"
-    assert {"platform", "file_name", "risk_level", "score", "summary", "findings", "categories", "metadata"}.issubset(
-        payload.keys()
-    )
+    assert {
+        "platform",
+        "file_name",
+        "risk_level",
+        "score",
+        "summary",
+        "findings",
+        "categories",
+        "top_risks",
+        "metadata",
+    }.issubset(payload.keys())
     assert isinstance(payload["score"], int)
     assert all("source" in finding for finding in payload["findings"])
     assert all("confidence_level" in finding for finding in payload["findings"])
@@ -64,7 +72,15 @@ def test_report_builder_routes_ios_and_returns_extended_shape() -> None:
         not finding["title"].startswith(("Confirmed:", "Heuristic:", "Informational:"))
         for finding in payload["findings"]
     )
-    assert sum(c["count"] for c in payload["categories"]) == payload["summary"]["total_findings"]
+    assert (
+        sum(c["count"] for c in payload["categories"])
+        == payload["summary"]["total_findings"]
+    )
+    assert payload["summary"]["by_platform"] == {
+        "android": 0,
+        "ios": len(payload["findings"]),
+    }
+    assert len(payload["top_risks"]) <= 3
 
 
 def test_report_builder_routes_only_ios_analyzer(monkeypatch) -> None:
@@ -88,8 +104,12 @@ def test_report_builder_routes_only_ios_analyzer(monkeypatch) -> None:
             }
         ]
 
-    monkeypatch.setattr("app.services.report_builder.analyze_android_package", fake_android_package)
-    monkeypatch.setattr("app.services.report_builder.analyze_ios_package", fake_ios_package)
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_android_package", fake_android_package
+    )
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_ios_package", fake_ios_package
+    )
 
     report = build_normalized_report(
         file_name="sample.ipa",
@@ -117,6 +137,25 @@ def test_report_builder_raises_for_missing_ios_info_plist() -> None:
     assert exc_info.value.code == "INVALID_ARCHIVE"
 
 
+def test_report_builder_returns_partial_report_for_missing_ios_info_plist() -> None:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("Payload/Sample.app/config.txt", "noop")
+
+    report = build_normalized_report(
+        file_name="broken.ipa",
+        platform="ios",
+        file_bytes=buffer.getvalue(),
+        file_extension=".ipa",
+        allow_partial=True,
+    )
+
+    assert report.analysis_status == "partial"
+    assert report.errors[0].code == "INVALID_ARCHIVE"
+    assert report.errors[0].details["finding_id"] == "IOS-PLIST-404"
+    assert any(finding.id == "IOS-METADATA-001" for finding in report.findings)
+
+
 def test_report_builder_routes_ios_with_entitlements_and_token_findings() -> None:
     file_bytes, extension = _build_ios_payload(include_entitlements=True)
 
@@ -132,7 +171,11 @@ def test_report_builder_routes_ios_with_entitlements_and_token_findings() -> Non
 
     assert "IOS-ENTITLEMENTS-DBG-001" in ids
     assert "IOS-STRINGS-TOKEN-001" in ids
-    debug_finding = next(finding for finding in payload["findings"] if finding["id"] == "IOS-ENTITLEMENTS-DBG-001")
+    debug_finding = next(
+        finding
+        for finding in payload["findings"]
+        if finding["id"] == "IOS-ENTITLEMENTS-DBG-001"
+    )
     assert debug_finding["confidence_level"] == "confirmed"
     assert debug_finding["detection_method"] == "entitlements-inspection"
 
@@ -149,7 +192,10 @@ def test_report_builder_gracefully_handles_missing_entitlements() -> None:
 
     payload = report.model_dump()
     assert payload["summary"]["total_findings"] == len(payload["findings"])
-    assert all(not finding["id"].startswith("IOS-ENTITLEMENTS-") for finding in payload["findings"])
+    assert all(
+        not finding["id"].startswith("IOS-ENTITLEMENTS-")
+        for finding in payload["findings"]
+    )
 
 
 def test_report_builder_wraps_ios_analyzer_failures(monkeypatch) -> None:
@@ -169,3 +215,25 @@ def test_report_builder_wraps_ios_analyzer_failures(monkeypatch) -> None:
     assert exc_info.value.code == "ANALYSIS_FAILED"
     assert exc_info.value.status_code == 500
     assert exc_info.value.details["stage"] == "ios-analyzer"
+
+
+def test_report_builder_isolates_ios_analyzer_failure_in_partial_mode(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.report_builder.analyze_ios_package",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("ios analyzer boom")),
+    )
+
+    report = build_normalized_report(
+        file_name="sample.ipa",
+        platform="ios",
+        file_bytes=b"placeholder",
+        file_extension=".ipa",
+        allow_partial=True,
+    )
+
+    assert report.analysis_status == "partial"
+    assert report.summary.total_findings == 0
+    assert report.errors[0].code == "ANALYZER_STEP_FAILED"
+    assert report.errors[0].stage == "ios-analyzer"

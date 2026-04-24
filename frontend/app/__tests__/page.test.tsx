@@ -1,51 +1,42 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import HomePage from "../page";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-// Mock fetch globally
+import HomePage from "../page";
+import {
+  mockCompletedScanJob,
+  mockFailedScanJob,
+  mockPartialScanJob,
+  mockQueuedScanJob,
+  mockRunningScanJob,
+  mockWarningScanJob,
+} from "./report-fixtures";
+
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
-
-const mockReport = {
-  platform: "android",
-  file_name: "test.apk",
-  risk_level: "medium",
-  score: 72,
-  summary: {
-    total_findings: 3,
-    by_severity: { low: 1, medium: 1, high: 1, critical: 0 },
-  },
-  findings: [
-    {
-      id: "ANDROID-001",
-      title: "Heuristic: Test finding",
-      severity: "high",
-      category: "security",
-      description: "A test finding",
-      recommendation: "Fix it",
-      source: "test",
-      confidence_level: "heuristic",
-      evidence: ["hardcoded_url=https://staging.example.com"],
-      detection_method: "archive-string-scan",
-      source_location: "assets/config.txt",
-    },
-  ],
-  categories: [{ name: "security", count: 1, max_severity: "high" }],
-  metadata: {
-    generated_at: "2025-01-01T00:00:00Z",
-    analyzer_version: "0.1.0",
-    analysis_mode: "static-placeholder",
-    file_extension: ".apk",
-  },
-};
 
 function getFileInput(): HTMLInputElement {
   return document.querySelector('input[type="file"]') as HTMLInputElement;
 }
 
 describe("HomePage", () => {
+  let createObjectUrlSpy: ReturnType<typeof vi.fn>;
+  let revokeObjectUrlSpy: ReturnType<typeof vi.fn>;
+  let clickSpy: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
+    vi.useRealTimers();
     mockFetch.mockReset();
+    createObjectUrlSpy = vi.fn(() => "blob:mock-export");
+    revokeObjectUrlSpy = vi.fn();
+    clickSpy = vi.fn();
+
+    URL.createObjectURL = createObjectUrlSpy as typeof URL.createObjectURL;
+    URL.revokeObjectURL = revokeObjectUrlSpy as typeof URL.revokeObjectURL;
+    HTMLAnchorElement.prototype.click = clickSpy as () => void;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders the upload form", () => {
@@ -62,15 +53,14 @@ describe("HomePage", () => {
 
   it("shows error when submitting without a file", async () => {
     render(<HomePage />);
-    const submitButton = screen.getByText("Upload for Analysis");
-    fireEvent.click(submitButton);
+    fireEvent.click(screen.getByText("Upload for Analysis"));
     expect(screen.getByText(/Select an APK, AAB, or IPA file first/)).toBeDefined();
   });
 
   it("shows loading state during upload", async () => {
     let resolveFetch: (value: {
       ok: boolean;
-      json: () => Promise<typeof mockReport>;
+      json: () => Promise<typeof mockCompletedScanJob>;
     }) => void = () => undefined;
 
     mockFetch.mockImplementation(
@@ -82,18 +72,19 @@ describe("HomePage", () => {
 
     render(<HomePage />);
 
-    const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
-    fireEvent.change(getFileInput(), { target: { files: [file] } });
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
     fireEvent.click(screen.getByText("Upload for Analysis"));
 
     await waitFor(() => {
-      expect(screen.getByText("Analyzing...")).toBeDefined();
+      expect(screen.getByText("Scan Running...")).toBeDefined();
     });
-    expect(screen.getByText("Analysis in progress. Please wait...")).toBeDefined();
+    expect(screen.getByText("Upload started. Creating scan job...")).toBeDefined();
 
     resolveFetch({
       ok: true,
-      json: () => Promise.resolve(mockReport),
+      json: () => Promise.resolve(mockCompletedScanJob),
     });
 
     await waitFor(() => {
@@ -101,33 +92,170 @@ describe("HomePage", () => {
     });
   });
 
-  it("displays report after successful upload", async () => {
+  it("displays score cards, top risks, and grouped findings after successful upload", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve(mockReport),
+      json: () => Promise.resolve(mockCompletedScanJob),
     });
 
     render(<HomePage />);
 
-    const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
-    fireEvent.change(getFileInput(), { target: { files: [file] } });
-
-    const submitButton = screen.getByText("Upload for Analysis");
-    fireEvent.click(submitButton);
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
 
     await waitFor(() => {
       expect(screen.getByText("Report")).toBeDefined();
     });
 
-    expect(screen.getByText(/test.apk/)).toBeDefined();
+    expect(screen.getByText(/Overall Score/)).toBeDefined();
+    expect(screen.getByText(/Scan completed. Report is ready./)).toBeDefined();
     expect(screen.getByText(/72\/100/)).toBeDefined();
+    expect(screen.getByText(/Moderate review priority/)).toBeDefined();
+    expect(screen.getByText(/Top Risks/)).toBeDefined();
+    expect(screen.getByText(/Findings by Severity/)).toBeDefined();
+    expect(screen.getByText(/Findings by Category/)).toBeDefined();
+    expect(screen.getByText(/Score is a directional indicator/i)).toBeDefined();
+    expect(screen.getAllByText(/archive-string-scan/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/assets\/config.txt/).length).toBeGreaterThan(0);
     expect(
-      screen.getAllByText((_, element) => element?.textContent === "ANDROID-001 — Test finding").length
+      screen.getAllByText(/hardcoded_url=https:\/\/staging.example.com/).length
     ).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Confidence heuristic")).toBeDefined();
-    expect(screen.getByText(/archive-string-scan/)).toBeDefined();
-    expect(screen.getByText(/assets\/config.txt/)).toBeDefined();
-    expect(screen.getByText(/hardcoded_url=https:\/\/staging.example.com/)).toBeDefined();
+    expect(screen.getAllByText("Security").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Network").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Metadata").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("Confidence heuristic").length).toBeGreaterThan(0);
+  });
+
+  it("offers JSON and HTML export actions after a successful upload", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockCompletedScanJob),
+    });
+
+    render(<HomePage />);
+
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Export JSON")).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByText("Export JSON"));
+    fireEvent.click(screen.getByText("Export HTML"));
+
+    expect(createObjectUrlSpy).toHaveBeenCalledTimes(2);
+    expect(revokeObjectUrlSpy).toHaveBeenCalledTimes(2);
+    expect(clickSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("distinguishes partial analysis from scan failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockPartialScanJob),
+    });
+
+    render(<HomePage />);
+
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "broken.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Report")).toBeDefined();
+    });
+
+    expect(screen.getAllByText(/Partial analysis completed/).length).toBeGreaterThan(0);
+    expect(screen.getByText("Partial analysis")).toBeDefined();
+    expect(screen.getByText("Analysis Diagnostics")).toBeDefined();
+    expect(screen.getByText(/INVALID_ARCHIVE/)).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("surfaces warning-only completed results", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockWarningScanJob),
+    });
+
+    render(<HomePage />);
+
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Report")).toBeDefined();
+    });
+
+    expect(screen.getAllByText(/Scan completed with warnings/).length).toBeGreaterThan(0);
+    expect(screen.getByText("Completed with warnings")).toBeDefined();
+    expect(screen.getByText(/ANDROID-JADX-SKIPPED/)).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("polls scan status until the report is completed", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockQueuedScanJob),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockRunningScanJob),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockCompletedScanJob),
+      });
+
+    render(<HomePage />);
+
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Upload started. Scan is queued./)).toBeDefined();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Scan in progress./)).toBeDefined();
+    }, { timeout: 2000 });
+
+    await waitFor(() => {
+      expect(screen.getByText("Report")).toBeDefined();
+    }, { timeout: 2500 });
+    expect(screen.getByText(/Scan completed. Report is ready./)).toBeDefined();
+  });
+
+  it("shows failed scan status from the job result", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(mockFailedScanJob),
+    });
+
+    render(<HomePage />);
+
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/INVALID_ARCHIVE/)).toBeDefined();
+    });
+
+    expect(screen.getByText(/Uploaded archive is invalid/)).toBeDefined();
+    expect(screen.getByText(/Failure stage: android-analyzer/)).toBeDefined();
+    expect(screen.getByText(/Job ID: scan-123/)).toBeDefined();
   });
 
   it("handles API error response", async () => {
@@ -135,17 +263,19 @@ describe("HomePage", () => {
       ok: false,
       json: () =>
         Promise.resolve({
-          error: { code: "INVALID_FILE_TYPE", message: "Only .apk, .aab, or .ipa files are supported" },
+          error: {
+            code: "INVALID_FILE_TYPE",
+            message: "Only .apk, .aab, or .ipa files are supported",
+          },
         }),
     });
 
     render(<HomePage />);
 
-    const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
-    fireEvent.change(getFileInput(), { target: { files: [file] } });
-
-    const submitButton = screen.getByText("Upload for Analysis");
-    fireEvent.click(submitButton);
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
+    fireEvent.click(screen.getByText("Upload for Analysis"));
 
     await waitFor(() => {
       expect(screen.getByText(/INVALID_FILE_TYPE/)).toBeDefined();
@@ -171,8 +301,9 @@ describe("HomePage", () => {
 
     render(<HomePage />);
 
-    const file = new File(["test"], "test.apk", { type: "application/octet-stream" });
-    fireEvent.change(getFileInput(), { target: { files: [file] } });
+    fireEvent.change(getFileInput(), {
+      target: { files: [new File(["test"], "test.apk", { type: "application/octet-stream" })] },
+    });
     fireEvent.click(screen.getByText("Upload for Analysis"));
 
     await waitFor(() => {

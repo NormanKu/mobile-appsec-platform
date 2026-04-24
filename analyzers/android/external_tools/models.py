@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-SignalKind = Literal["readable_source", "hardcoded_url", "candidate_secret", "naming_pattern"]
+SignalKind = Literal[
+    "readable_source", "hardcoded_url", "candidate_secret", "naming_pattern"
+]
 
 
 @dataclass(frozen=True)

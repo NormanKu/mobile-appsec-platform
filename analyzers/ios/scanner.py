@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 from dataclasses import dataclass
 from io import BytesIO
@@ -8,17 +9,26 @@ import re
 from urllib.parse import urlparse
 from zipfile import BadZipFile, ZipFile
 
+from analyzers.patterns import (
+    BEARER_PATTERN,
+    JWT_PATTERN,
+    PRIVATE_KEY_PATTERN,
+    URL_PATTERN,
+)
 from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
 
 logger = logging.getLogger(__name__)
-
-URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
 SECRET_ASSIGNMENT_PATTERN = re.compile(
     r"(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|private[_-]?key|refresh[_-]?token|secret|token)\s*[:=]\s*[\"']?([A-Za-z0-9_\-+/=:.]{8,})"
 )
-JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
-BEARER_PATTERN = re.compile(r"(?i)bearer\s+([A-Za-z0-9\-._~+/=]{12,})")
-PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
+ENDPOINT_ASSIGNMENT_PATTERN = re.compile(
+    r"""(?ix)
+    \b(?:api|base|endpoint|host|server|origin|domain|url)[\w.-]{0,20}
+    \s*[:=]\s*
+    ["']?
+    ([A-Za-z0-9._-]+(?::\d{2,5})?(?:/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*)?)
+    """
+)
 
 TEXT_EXTENSIONS = {
     ".cfg",
@@ -41,10 +51,12 @@ IGNORED_URLS = {
 NON_PRODUCTION_URL_KEYWORDS = (
     "dev",
     "debug",
+    "demo",
     "internal",
     "localhost",
     "qa",
     "sandbox",
+    "sample",
     "staging",
     "test",
     "uat",
@@ -53,6 +65,18 @@ WEAK_TLS_VALUES = {"tlsv1.0", "tlsv1.1"}
 MAX_TEXT_FILE_SIZE = 1_000_000
 MAX_TEXT_FILES_SCANNED = 200
 MAX_SAMPLE_VALUES = 5
+HIGH_COLLISION_URL_SCHEMES = {
+    "app",
+    "auth",
+    "callback",
+    "demo",
+    "ios",
+    "login",
+    "oauth",
+    "sample",
+    "staging",
+    "test",
+}
 
 
 @dataclass
@@ -86,7 +110,7 @@ def analyze_ios_package(
     max_files: int | None = None,
     max_text_file_size: int | None = None,
     max_text_files_scanned: int | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     extension = file_extension.lower()
     if extension != ".ipa":
         return [
@@ -111,19 +135,105 @@ def analyze_ios_package(
                 zip_limit_kwargs["max_files"] = max_files
             validate_zip_limits(archive, **zip_limit_kwargs)
 
-            metadata = _extract_basic_metadata(archive=archive, file_bytes=file_bytes)
-            findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
-            findings.extend(_inspect_info_plist(metadata=metadata))
-            findings.extend(_inspect_entitlements(metadata=metadata))
-            findings.extend(
-                _scan_archive_strings(
-                    archive=archive,
-                    max_text_file_size=MAX_TEXT_FILE_SIZE if max_text_file_size is None else max_text_file_size,
-                    max_text_files_scanned=(
-                        MAX_TEXT_FILES_SCANNED if max_text_files_scanned is None else max_text_files_scanned
-                    ),
+            findings: list[dict[str, object]] = []
+            metadata: IosPackageMetadata | None = None
+
+            try:
+                metadata = _extract_basic_metadata(
+                    archive=archive, file_bytes=file_bytes
                 )
-            )
+                findings.extend(
+                    _build_metadata_findings(file_name=file_name, metadata=metadata)
+                )
+            except (
+                OSError,
+                KeyError,
+                ValueError,
+                plistlib.InvalidFileException,
+                RuntimeError,
+            ) as exc:
+                logger.warning(
+                    "iOS metadata inspection failed for %s: %s", file_name, exc
+                )
+                findings.append(
+                    _build_diagnostic_finding(
+                        code="IOS-METADATA-WARN-001",
+                        title="iOS metadata inspection failed",
+                        message="IPA metadata could not be fully extracted",
+                        stage="archive-metadata-inspection",
+                        source="archive/metadata",
+                        recommendation="Review IPA bundle structure and retry with a package produced by the normal release export",
+                        details={"reason": str(exc)},
+                    )
+                )
+
+            if metadata is not None:
+                try:
+                    findings.extend(_inspect_info_plist(metadata=metadata))
+                except (OSError, KeyError, ValueError, RuntimeError) as exc:
+                    logger.warning(
+                        "iOS Info.plist inspection failed for %s: %s", file_name, exc
+                    )
+                    findings.append(
+                        _build_diagnostic_finding(
+                            code="IOS-PLIST-WARN-001",
+                            title="Info.plist inspection failed",
+                            message="Info.plist checks could not be fully completed",
+                            stage="info-plist-inspection",
+                            source=metadata.info_plist_path
+                            or "Payload/*.app/Info.plist",
+                            recommendation="Validate Info.plist content and rerun analysis before relying on plist-specific results",
+                            details={"reason": str(exc)},
+                        )
+                    )
+
+                try:
+                    findings.extend(_inspect_entitlements(metadata=metadata))
+                except (OSError, KeyError, ValueError, RuntimeError) as exc:
+                    logger.warning(
+                        "iOS entitlement inspection failed for %s: %s", file_name, exc
+                    )
+                    findings.append(
+                        _build_diagnostic_finding(
+                            code="IOS-ENTITLEMENTS-WARN-001",
+                            title="Entitlement inspection failed",
+                            message="Entitlement checks could not be fully completed",
+                            stage="entitlements-inspection",
+                            source=metadata.entitlements_path or "entitlements",
+                            recommendation="Validate entitlement sources and rerun analysis before relying on entitlement results",
+                            details={"reason": str(exc)},
+                        )
+                    )
+
+            try:
+                findings.extend(
+                    _scan_archive_strings(
+                        archive=archive,
+                        max_text_file_size=MAX_TEXT_FILE_SIZE
+                        if max_text_file_size is None
+                        else max_text_file_size,
+                        max_text_files_scanned=(
+                            MAX_TEXT_FILES_SCANNED
+                            if max_text_files_scanned is None
+                            else max_text_files_scanned
+                        ),
+                    )
+                )
+            except (OSError, KeyError, UnicodeError, RuntimeError) as exc:
+                logger.warning(
+                    "iOS archive string scan failed for %s: %s", file_name, exc
+                )
+                findings.append(
+                    _build_diagnostic_finding(
+                        code="IOS-STRINGS-WARN-001",
+                        title="iOS string scan failed",
+                        message="IPA string inspection could not be fully completed",
+                        stage="archive-string-scan",
+                        source="archive/strings",
+                        recommendation="Review package readability and rerun analysis before relying on URL, endpoint, token, or secret detection results",
+                        details={"reason": str(exc)},
+                    )
+                )
             return findings
     except ZipExtractionLimitExceeded as exc:
         return [
@@ -168,9 +278,13 @@ def _extract_basic_metadata(archive: ZipFile, file_bytes: bytes) -> IosPackageMe
 
     bundle_executable = _get_plist_value(info_plist, "CFBundleExecutable")
     bundle_executable_path = (
-        f"{payload_app_path}/{bundle_executable}" if payload_app_path and bundle_executable else None
+        f"{payload_app_path}/{bundle_executable}"
+        if payload_app_path and bundle_executable
+        else None
     )
-    bundle_executable_present = bundle_executable_path in names if bundle_executable_path else False
+    bundle_executable_present = (
+        bundle_executable_path in names if bundle_executable_path else False
+    )
 
     return IosPackageMetadata(
         archive_size_bytes=len(file_bytes),
@@ -195,7 +309,9 @@ def _extract_basic_metadata(archive: ZipFile, file_bytes: bytes) -> IosPackageMe
     )
 
 
-def _build_metadata_findings(file_name: str, metadata: IosPackageMetadata) -> list[dict[str, str]]:
+def _build_metadata_findings(
+    file_name: str, metadata: IosPackageMetadata
+) -> list[dict[str, object]]:
     details = [
         f"archive_size_bytes={metadata.archive_size_bytes}",
         f"file_count={metadata.file_count}",
@@ -214,7 +330,9 @@ def _build_metadata_findings(file_name: str, metadata: IosPackageMetadata) -> li
         details.append(f"bundle_display_name={metadata.bundle_display_name}")
     if metadata.bundle_executable:
         details.append(f"bundle_executable={metadata.bundle_executable}")
-        details.append(f"bundle_executable_present={metadata.bundle_executable_present}")
+        details.append(
+            f"bundle_executable_present={metadata.bundle_executable_present}"
+        )
     if metadata.bundle_version:
         details.append(f"bundle_version={metadata.bundle_version}")
     if metadata.bundle_short_version:
@@ -293,12 +411,16 @@ def _build_metadata_findings(file_name: str, metadata: IosPackageMetadata) -> li
     return findings
 
 
-def _inspect_info_plist(metadata: IosPackageMetadata) -> list[dict[str, str]]:
-    if not metadata.info_plist_path or not metadata.info_plist_readable or not isinstance(metadata.info_plist, dict):
+def _inspect_info_plist(metadata: IosPackageMetadata) -> list[dict[str, object]]:
+    if (
+        not metadata.info_plist_path
+        or not metadata.info_plist_readable
+        or not isinstance(metadata.info_plist, dict)
+    ):
         return []
 
     info = metadata.info_plist
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, object]] = []
 
     ats = info.get("NSAppTransportSecurity")
     if isinstance(ats, dict) and ats.get("NSAllowsArbitraryLoads") is True:
@@ -327,7 +449,8 @@ def _inspect_info_plist(metadata: IosPackageMetadata) -> list[dict[str, str]]:
                 title="Scoped ATS exceptions allow broader cleartext traffic",
                 severity="medium",
                 category="network",
-                description="One or more ATS scoped arbitrary-load keys are enabled: " + ", ".join(scoped_arbitrary_loads),
+                description="One or more ATS scoped arbitrary-load keys are enabled: "
+                + ", ".join(scoped_arbitrary_loads),
                 recommendation="Review whether scoped ATS relaxations are still required and remove them where possible",
                 source=metadata.info_plist_path,
                 confidence="confirmed",
@@ -367,6 +490,76 @@ def _inspect_info_plist(metadata: IosPackageMetadata) -> list[dict[str, str]]:
                 recommendation="Raise minimum TLS requirements to TLS 1.2 or higher unless legacy systems are unavoidable",
                 source=metadata.info_plist_path,
                 confidence="confirmed",
+            )
+        )
+
+    if isinstance(ats, dict) and ats.get("NSAllowsLocalNetworking") is True:
+        findings.append(
+            _build_finding(
+                id="IOS-PLIST-ATS-005",
+                title="ATS local networking exceptions are enabled",
+                severity="low",
+                category="network",
+                description="NSAllowsLocalNetworking=true permits ATS exceptions for local network destinations",
+                recommendation="Confirm local-network traffic is required in production and validate any nearby-device or LAN trust assumptions",
+                source=metadata.info_plist_path,
+                confidence="heuristic",
+            )
+        )
+
+    no_forward_secrecy_domains = _get_no_forward_secrecy_exception_domains(ats)
+    if no_forward_secrecy_domains:
+        findings.append(
+            _build_finding(
+                id="IOS-PLIST-ATS-006",
+                title="ATS exception domains disable forward secrecy requirements",
+                severity="medium",
+                category="network",
+                description=(
+                    "One or more ATS exception domains disable forward secrecy requirements, sample: "
+                    + ", ".join(no_forward_secrecy_domains[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Keep ATS forward secrecy enabled unless a legacy dependency is unavoidable and explicitly documented",
+                source=metadata.info_plist_path,
+                confidence="confirmed",
+            )
+        )
+
+    bundle_url_schemes = _get_bundle_url_schemes(info)
+    if bundle_url_schemes:
+        findings.append(
+            _build_finding(
+                id="IOS-PLIST-URL-001",
+                title="Custom URL schemes register app deep-link handlers",
+                severity="low",
+                category="deep-links",
+                description=(
+                    "CFBundleURLTypes registers one or more custom URL schemes, sample: "
+                    + ", ".join(bundle_url_schemes[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Review deep-link handlers to ensure inbound parameters are validated and sensitive actions require authenticated app state",
+                source=metadata.info_plist_path,
+                confidence="heuristic",
+            )
+        )
+
+    high_collision_schemes = [
+        scheme for scheme in bundle_url_schemes if _is_high_collision_url_scheme(scheme)
+    ]
+    if high_collision_schemes:
+        findings.append(
+            _build_finding(
+                id="IOS-PLIST-URL-002",
+                title="Custom URL schemes use generic or collision-prone names",
+                severity="medium",
+                category="deep-links",
+                description=(
+                    "One or more registered custom URL schemes are generic enough to deserve extra review, sample: "
+                    + ", ".join(high_collision_schemes[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Prefer app-specific URL scheme names and validate every inbound deep-link path before executing sensitive flows",
+                source=metadata.info_plist_path,
+                confidence="heuristic",
             )
         )
 
@@ -459,12 +652,16 @@ def _inspect_info_plist(metadata: IosPackageMetadata) -> list[dict[str, str]]:
     return findings
 
 
-def _inspect_entitlements(metadata: IosPackageMetadata) -> list[dict[str, str]]:
-    if not metadata.entitlements_readable or not isinstance(metadata.entitlements, dict) or not metadata.entitlements_path:
+def _inspect_entitlements(metadata: IosPackageMetadata) -> list[dict[str, object]]:
+    if (
+        not metadata.entitlements_readable
+        or not isinstance(metadata.entitlements, dict)
+        or not metadata.entitlements_path
+    ):
         return []
 
     entitlements = metadata.entitlements
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, object]] = []
 
     if entitlements.get("get-task-allow") is True:
         findings.append(
@@ -495,6 +692,24 @@ def _inspect_entitlements(metadata: IosPackageMetadata) -> list[dict[str, str]]:
             )
         )
 
+    wildcard_keychain_groups = [group for group in keychain_groups if "*" in group]
+    if wildcard_keychain_groups:
+        findings.append(
+            _build_finding(
+                id="IOS-ENTITLEMENTS-KEYCHAIN-002",
+                title="Wildcard keychain access groups are configured",
+                severity="high",
+                category="entitlements",
+                description=(
+                    "One or more keychain access groups contain wildcard scope, sample: "
+                    + ", ".join(wildcard_keychain_groups[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Use the narrowest possible keychain access groups and avoid wildcard-style sharing in production builds",
+                source=metadata.entitlements_path,
+                confidence="heuristic",
+            )
+        )
+
     app_groups = _get_string_list(entitlements, "com.apple.security.application-groups")
     if len(app_groups) > 3:
         findings.append(
@@ -505,6 +720,46 @@ def _inspect_entitlements(metadata: IosPackageMetadata) -> list[dict[str, str]]:
                 category="entitlements",
                 description=f"Detected {len(app_groups)} application groups, sample: {', '.join(app_groups[:MAX_SAMPLE_VALUES])}",
                 recommendation="Review app group usage and remove shared containers that are no longer required",
+                source=metadata.entitlements_path,
+                confidence="heuristic",
+            )
+        )
+
+    associated_domains = _get_string_list(
+        entitlements, "com.apple.developer.associated-domains"
+    )
+    if associated_domains:
+        findings.append(
+            _build_finding(
+                id="IOS-ENTITLEMENTS-LINKS-001",
+                title="Associated domains enable universal links or shared web credentials",
+                severity="medium",
+                category="entitlements",
+                description=(
+                    "Associated domains entitlement is present, sample: "
+                    + ", ".join(associated_domains[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Review associated-domain handlers to ensure only intended domains are trusted for universal links or shared credentials",
+                source=metadata.entitlements_path,
+                confidence="heuristic",
+            )
+        )
+
+    wildcard_associated_domains = [
+        domain for domain in associated_domains if "*" in domain
+    ]
+    if wildcard_associated_domains:
+        findings.append(
+            _build_finding(
+                id="IOS-ENTITLEMENTS-LINKS-002",
+                title="Associated domains use wildcard or overly broad scopes",
+                severity="high",
+                category="entitlements",
+                description=(
+                    "One or more associated-domain entries use wildcard scope, sample: "
+                    + ", ".join(wildcard_associated_domains[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Restrict associated domains to the exact production hosts required for universal links or shared credentials",
                 source=metadata.entitlements_path,
                 confidence="heuristic",
             )
@@ -532,10 +787,11 @@ def _scan_archive_strings(
     archive: ZipFile,
     max_text_file_size: int = MAX_TEXT_FILE_SIZE,
     max_text_files_scanned: int = MAX_TEXT_FILES_SCANNED,
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     urls: set[str] = set()
     insecure_http_urls: set[str] = set()
-    non_production_urls: set[str] = set()
+    non_production_endpoints: set[str] = set()
+    endpoint_candidates: set[str] = set()
     secrets: set[str] = set()
     tokens: set[str] = set()
     scanned_files = 0
@@ -544,14 +800,18 @@ def _scan_archive_strings(
         if entry.is_dir() or scanned_files >= max_text_files_scanned:
             continue
 
-        if not _looks_like_text(entry.filename, entry.file_size, max_text_file_size=max_text_file_size):
+        if not _looks_like_text(
+            entry.filename, entry.file_size, max_text_file_size=max_text_file_size
+        ):
             continue
 
         scanned_files += 1
         try:
             content_bytes = archive.read(entry.filename)
         except (OSError, KeyError) as exc:
-            logger.debug("Skipping unreadable archive entry %s: %s", entry.filename, exc)
+            logger.debug(
+                "Skipping unreadable archive entry %s: %s", entry.filename, exc
+            )
             continue
 
         if entry.filename.endswith((".plist", ".xcent", ".entitlements")):
@@ -559,10 +819,24 @@ def _scan_archive_strings(
         else:
             content = content_bytes.decode("utf-8", errors="ignore")
 
-        matched_urls = [url for url in URL_PATTERN.findall(content) if _is_noteworthy_url(url)]
+        matched_urls = [
+            url for url in URL_PATTERN.findall(content) if _is_noteworthy_url(url)
+        ]
         urls.update(matched_urls)
-        insecure_http_urls.update(url for url in matched_urls if url.lower().startswith("http://"))
-        non_production_urls.update(url for url in matched_urls if _looks_like_non_production_url(url))
+        insecure_http_urls.update(
+            url for url in matched_urls if url.lower().startswith("http://")
+        )
+        non_production_endpoints.update(
+            url for url in matched_urls if _looks_like_non_production_endpoint(url)
+        )
+
+        matched_endpoints = _extract_endpoint_candidates(content)
+        endpoint_candidates.update(matched_endpoints)
+        non_production_endpoints.update(
+            endpoint
+            for endpoint in matched_endpoints
+            if _looks_like_non_production_endpoint(endpoint)
+        )
 
         for match in SECRET_ASSIGNMENT_PATTERN.finditer(content):
             secrets.add(f"{match.group(1)}={_truncate_value(match.group(2))}")
@@ -576,7 +850,7 @@ def _scan_archive_strings(
         if PRIVATE_KEY_PATTERN.search(content):
             secrets.add("private-key-material")
 
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, object]] = []
 
     if urls:
         findings.append(
@@ -609,7 +883,7 @@ def _scan_archive_strings(
             )
         )
 
-    if non_production_urls:
+    if non_production_endpoints:
         findings.append(
             _build_finding(
                 id="IOS-STRINGS-URL-003",
@@ -617,10 +891,27 @@ def _scan_archive_strings(
                 severity="medium",
                 category="network",
                 description=(
-                    "Detected URL(s) that look like staging, test, localhost, or internal endpoints, sample: "
-                    + ", ".join(sorted(non_production_urls)[:MAX_SAMPLE_VALUES])
+                    "Detected URL(s) or endpoint(s) that look like staging, test, localhost, or internal destinations, sample: "
+                    + ", ".join(sorted(non_production_endpoints)[:MAX_SAMPLE_VALUES])
                 ),
                 recommendation="Verify non-production endpoints are excluded from release builds",
+                source="archive/strings",
+                confidence="heuristic",
+            )
+        )
+
+    if endpoint_candidates:
+        findings.append(
+            _build_finding(
+                id="IOS-STRINGS-ENDPOINT-001",
+                title="Endpoint-like host values discovered without explicit URL schemes",
+                severity="medium",
+                category="network",
+                description=(
+                    "Detected endpoint-like host assignments without explicit URL schemes, sample: "
+                    + ", ".join(sorted(endpoint_candidates)[:MAX_SAMPLE_VALUES])
+                ),
+                recommendation="Review embedded host and endpoint configuration values and keep environment routing out of shipped bundles where possible",
                 source="archive/strings",
                 confidence="heuristic",
             )
@@ -660,14 +951,14 @@ def _scan_archive_strings(
             )
         )
 
-    if not urls and not secrets and not tokens:
+    if not urls and not endpoint_candidates and not secrets and not tokens:
         findings.append(
             _build_finding(
                 id="IOS-STRINGS-000",
-                title="No URL or secret patterns detected in scanned text assets",
+                title="No URL, endpoint, or secret patterns detected in scanned text assets",
                 severity="low",
                 category="strings",
-                description="No URL, token, or secret patterns matched in sampled text files",
+                description="No URL, endpoint, token, or secret patterns matched in sampled text files",
                 recommendation="Expand inspection depth to more bundle artifacts in future iterations if needed",
                 source="archive/strings",
                 confidence="informational",
@@ -688,13 +979,22 @@ def _resolve_payload_app_path(names: list[str]) -> str | None:
     return candidates[0] if candidates else None
 
 
-def _resolve_info_plist_path(names: list[str], payload_app_path: str | None) -> str | None:
+def _resolve_info_plist_path(
+    names: list[str], payload_app_path: str | None
+) -> str | None:
     if payload_app_path:
         direct_path = f"{payload_app_path}/Info.plist"
         if direct_path in names:
             return direct_path
 
-    return next((name for name in sorted(names) if name.startswith("Payload/") and name.endswith(".app/Info.plist")), None)
+    return next(
+        (
+            name
+            for name in sorted(names)
+            if name.startswith("Payload/") and name.endswith(".app/Info.plist")
+        ),
+        None,
+    )
 
 
 def _load_plist_entry(archive: ZipFile, path: str | None) -> dict[str, object] | None:
@@ -721,7 +1021,8 @@ def _load_entitlements(
     entitlement_candidates = [
         path
         for path in sorted(names)
-        if path.startswith(f"{payload_app_path}/") and path.endswith((".xcent", ".entitlements"))
+        if path.startswith(f"{payload_app_path}/")
+        and path.endswith((".xcent", ".entitlements"))
     ]
     for candidate in entitlement_candidates:
         entitlements = _load_plist_entry(archive, candidate)
@@ -733,7 +1034,8 @@ def _load_entitlements(
         (
             path
             for path in sorted(names)
-            if path.startswith(f"{payload_app_path}/") and path.endswith("embedded.mobileprovision")
+            if path.startswith(f"{payload_app_path}/")
+            and path.endswith("embedded.mobileprovision")
         ),
         None,
     )
@@ -744,13 +1046,24 @@ def _load_entitlements(
         raw_profile = archive.read(mobileprovision_path)
         entitlements = _extract_entitlements_from_mobileprovision(raw_profile)
     except (plistlib.InvalidFileException, ValueError, KeyError, OSError) as exc:
-        logger.warning("Failed to parse mobileprovision entitlements at %s: %s", mobileprovision_path, exc)
+        logger.warning(
+            "Failed to parse mobileprovision entitlements at %s: %s",
+            mobileprovision_path,
+            exc,
+        )
         return mobileprovision_path, "embedded-mobileprovision", None, False
 
-    return mobileprovision_path, "embedded-mobileprovision", entitlements, entitlements is not None
+    return (
+        mobileprovision_path,
+        "embedded-mobileprovision",
+        entitlements,
+        entitlements is not None,
+    )
 
 
-def _extract_entitlements_from_mobileprovision(content: bytes) -> dict[str, object] | None:
+def _extract_entitlements_from_mobileprovision(
+    content: bytes,
+) -> dict[str, object] | None:
     plist_bytes = _extract_embedded_plist_bytes(content)
     profile = plistlib.loads(plist_bytes)
     if not isinstance(profile, dict):
@@ -782,7 +1095,10 @@ def _get_insecure_http_exception_domains(ats: object) -> list[str]:
 
     insecure_domains = []
     for domain, settings in exception_domains.items():
-        if isinstance(settings, dict) and settings.get("NSExceptionAllowsInsecureHTTPLoads") is True:
+        if (
+            isinstance(settings, dict)
+            and settings.get("NSExceptionAllowsInsecureHTTPLoads") is True
+        ):
             insecure_domains.append(str(domain))
     return insecure_domains
 
@@ -806,7 +1122,27 @@ def _get_weak_tls_exception_domains(ats: object) -> list[str]:
     return weak_domains
 
 
-def _looks_like_text(file_name: str, size: int, max_text_file_size: int = MAX_TEXT_FILE_SIZE) -> bool:
+def _get_no_forward_secrecy_exception_domains(ats: object) -> list[str]:
+    if not isinstance(ats, dict):
+        return []
+
+    exception_domains = ats.get("NSExceptionDomains")
+    if not isinstance(exception_domains, dict):
+        return []
+
+    no_forward_secrecy_domains = []
+    for domain, settings in exception_domains.items():
+        if (
+            isinstance(settings, dict)
+            and settings.get("NSExceptionRequiresForwardSecrecy") is False
+        ):
+            no_forward_secrecy_domains.append(str(domain))
+    return no_forward_secrecy_domains
+
+
+def _looks_like_text(
+    file_name: str, size: int, max_text_file_size: int = MAX_TEXT_FILE_SIZE
+) -> bool:
     if size <= 0 or size > max_text_file_size:
         return False
 
@@ -842,15 +1178,92 @@ def _get_string_list(container: dict[str, object] | None, key: str) -> list[str]
     return [str(item) for item in value if item is not None]
 
 
+def _get_bundle_url_schemes(info: dict[str, object] | None) -> list[str]:
+    if not isinstance(info, dict):
+        return []
+
+    raw_url_types = info.get("CFBundleURLTypes")
+    if not isinstance(raw_url_types, list):
+        return []
+
+    schemes: list[str] = []
+    for entry in raw_url_types:
+        if not isinstance(entry, dict):
+            continue
+        raw_schemes = entry.get("CFBundleURLSchemes")
+        if not isinstance(raw_schemes, list):
+            continue
+        schemes.extend(str(scheme) for scheme in raw_schemes if scheme is not None)
+
+    deduped = list(dict.fromkeys(schemes))
+    return deduped
+
+
+def _is_high_collision_url_scheme(scheme: str) -> bool:
+    lowered = scheme.lower()
+    if lowered in HIGH_COLLISION_URL_SCHEMES:
+        return True
+    if len(lowered) <= 3:
+        return True
+    return any(
+        keyword in lowered
+        for keyword in ("auth", "demo", "login", "oauth", "sample", "test")
+    )
+
+
 def _is_noteworthy_url(url: str) -> bool:
     return url.lower() not in IGNORED_URLS
 
 
-def _looks_like_non_production_url(url: str) -> bool:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
+def _extract_endpoint_candidates(content: str) -> set[str]:
+    endpoints: set[str] = set()
+    for raw_candidate in ENDPOINT_ASSIGNMENT_PATTERN.findall(content):
+        candidate = raw_candidate.strip().strip("\"'").rstrip(".,);")
+        if candidate.startswith(("http://", "https://")):
+            continue
+        if _looks_like_endpoint_candidate(candidate):
+            endpoints.add(candidate)
+    return endpoints
+
+
+def _looks_like_endpoint_candidate(candidate: str) -> bool:
+    parsed = urlparse(f"//{candidate}")
+    host = parsed.hostname
+    if not host:
+        return False
+
+    if host == "localhost" or host.endswith(".local"):
+        return True
+
+    try:
+        return True if ipaddress.ip_address(host) else False
+    except ValueError:
+        pass
+
+    return "." in host and len(host.rsplit(".", 1)[-1]) >= 2
+
+
+def _looks_like_non_production_endpoint(value: str) -> bool:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    host = (parsed.hostname or "").lower()
     path = parsed.path.lower()
-    return any(keyword in host or keyword in path for keyword in NON_PRODUCTION_URL_KEYWORDS)
+    if not host:
+        return False
+
+    if host == "localhost" or host.endswith(".local"):
+        return True
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local):
+        return True
+
+    return any(
+        keyword in host or keyword in path for keyword in NON_PRODUCTION_URL_KEYWORDS
+    )
 
 
 def _truncate_value(value: str, prefix_length: int = 6) -> str:
@@ -886,10 +1299,49 @@ def _build_finding(
         "recommendation": recommendation,
         "source": source,
         "confidence_level": confidence,
-        "evidence": evidence if evidence is not None else _infer_evidence(id=id, description=description),
+        "evidence": evidence
+        if evidence is not None
+        else _infer_evidence(id=id, description=description),
         "detection_method": detection_method or _infer_detection_method(id=id),
-        "source_location": source_location if source_location is not None else _infer_source_location(source),
+        "source_location": source_location
+        if source_location is not None
+        else _infer_source_location(source),
     }
+
+
+def _build_diagnostic_finding(
+    *,
+    code: str,
+    title: str,
+    message: str,
+    stage: str,
+    source: str,
+    recommendation: str,
+    details: dict[str, object] | None = None,
+) -> dict[str, object]:
+    finding = _build_finding(
+        id=code,
+        title=title,
+        severity="low",
+        category="analysis-warning",
+        description=message,
+        recommendation=recommendation,
+        source=source,
+        confidence="informational",
+        evidence=[message],
+        detection_method=stage,
+        source_location=None,
+    )
+    finding.update(
+        {
+            "diagnostic_level": "warning",
+            "diagnostic_code": code,
+            "diagnostic_message": message,
+            "diagnostic_stage": stage,
+            "diagnostic_details": details or {},
+        }
+    )
+    return finding
 
 
 def _infer_detection_method(*, id: str) -> str:
@@ -911,7 +1363,11 @@ def _infer_detection_method(*, id: str) -> str:
 
 
 def _infer_source_location(source: str) -> str | None:
-    return None if source.startswith("archive/") or source.startswith("upload/") else source
+    return (
+        None
+        if source.startswith("archive/") or source.startswith("upload/")
+        else source
+    )
 
 
 def _infer_evidence(*, id: str, description: str) -> list[str]:
@@ -920,10 +1376,16 @@ def _infer_evidence(*, id: str, description: str) -> list[str]:
 
     if "sample: " in description:
         sample = description.split("sample: ", 1)[1]
-        return [item.strip() for item in sample.split(", ") if item.strip()][:MAX_SAMPLE_VALUES]
+        return [item.strip() for item in sample.split(", ") if item.strip()][
+            :MAX_SAMPLE_VALUES
+        ]
 
     explicit_evidence = {
         "IOS-PLIST-ATS-001": ["NSAllowsArbitraryLoads=true"],
+        "IOS-PLIST-ATS-003": [
+            "NSAllowsArbitraryLoadsInWebContent=true or NSAllowsArbitraryLoadsForMedia=true"
+        ],
+        "IOS-PLIST-ATS-005": ["NSAllowsLocalNetworking=true"],
         "IOS-PLIST-FILE-001": ["UIFileSharingEnabled=true"],
         "IOS-PLIST-FILE-002": ["LSSupportsOpeningDocumentsInPlace=true"],
         "IOS-PLIST-BUNDLE-001": ["CFBundleIdentifier missing"],

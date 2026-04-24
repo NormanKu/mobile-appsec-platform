@@ -17,7 +17,10 @@ def validate_upload_file(file: UploadFile) -> tuple[str, str]:
             code="INVALID_FILE_TYPE",
             message="Only .apk, .aab, or .ipa files are supported",
             status_code=400,
-            details={"file_name": file_name, "allowed_extensions": sorted(SUPPORTED_EXTENSIONS)},
+            details={
+                "file_name": file_name,
+                "allowed_extensions": sorted(SUPPORTED_EXTENSIONS),
+            },
         )
 
     size = _get_upload_size(file)
@@ -26,7 +29,11 @@ def validate_upload_file(file: UploadFile) -> tuple[str, str]:
             code="FILE_TOO_LARGE",
             message=f"Upload exceeds max size of {settings.max_upload_size_bytes} bytes",
             status_code=413,
-            details={"file_name": file_name, "size_bytes": size, "max_size_bytes": settings.max_upload_size_bytes},
+            details={
+                "file_name": file_name,
+                "size_bytes": size,
+                "max_size_bytes": settings.max_upload_size_bytes,
+            },
         )
 
     return file_name, extension
