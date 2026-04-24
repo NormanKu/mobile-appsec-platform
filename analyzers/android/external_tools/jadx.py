@@ -8,14 +8,10 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 
+from analyzers.patterns import URL_PATTERN, SECRET_PATTERN
 from .models import AndroidExternalToolResult, AndroidExternalToolSignal
 
 logger = logging.getLogger(__name__)
-
-URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
-SECRET_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|client[_-]?secret|secret|token|passwd|password)\s*[:=]\s*[\"']?([A-Za-z0-9_\-+/=]{8,})"
-)
 PACKAGE_PATTERN = re.compile(r"^\s*package\s+([A-Za-z0-9_.]+)", re.MULTILINE)
 CLASS_PATTERN = re.compile(r"\b(class|interface|object|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -101,13 +97,14 @@ class JadxAdapter:
                     error=error_message,
                 )
 
-            signals, scanned_files = self._collect_signals(output_dir)
+            signals, scanned_files, skipped = self._collect_signals(output_dir)
             return AndroidExternalToolResult(
                 tool_name="jadx",
                 available=True,
                 executed=True,
                 signals=signals,
                 source_files_scanned=scanned_files,
+                skipped_files=skipped,
             )
 
     def _resolve_executable(self) -> str | None:
@@ -135,10 +132,11 @@ class JadxAdapter:
             timeout=self.timeout_seconds,
         )
 
-    def _collect_signals(self, output_dir: Path) -> tuple[tuple[AndroidExternalToolSignal, ...], int]:
+    def _collect_signals(self, output_dir: Path) -> tuple[tuple[AndroidExternalToolSignal, ...], int, int]:
         collected: list[AndroidExternalToolSignal] = []
         seen: set[tuple[str, str]] = set()
         scanned_files = 0
+        skipped_files = 0
 
         for source_path in self._iter_source_files(output_dir):
             if scanned_files >= self.max_source_files:
@@ -148,6 +146,7 @@ class JadxAdapter:
                 file_size = source_path.stat().st_size
             except OSError as exc:
                 logger.debug("Skipping unreadable JADX output %s: %s", source_path, exc)
+                skipped_files += 1
                 continue
 
             if file_size <= 0 or file_size > self.max_source_file_size:
@@ -157,6 +156,7 @@ class JadxAdapter:
                 content = source_path.read_text(encoding="utf-8", errors="ignore")
             except OSError as exc:
                 logger.debug("Skipping unreadable JADX output %s: %s", source_path, exc)
+                skipped_files += 1
                 continue
 
             scanned_files += 1
@@ -202,7 +202,9 @@ class JadxAdapter:
                     location=relative_path,
                 )
 
-        return tuple(collected), scanned_files
+        if skipped_files > 0:
+            logger.info("JADX scan skipped %d unreadable file(s)", skipped_files)
+        return tuple(collected), scanned_files, skipped_files
 
     def _iter_source_files(self, output_dir: Path) -> list[Path]:
         return sorted(

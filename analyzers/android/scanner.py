@@ -7,14 +7,10 @@ import re
 from zipfile import BadZipFile, ZipFile
 
 from analyzers.android.external_tools import AndroidExternalToolResult, analyze_with_jadx
+from analyzers.patterns import URL_PATTERN, SECRET_PATTERN
 from analyzers.safe_zip import ZipExtractionLimitExceeded, validate_zip_limits
 
 logger = logging.getLogger(__name__)
-
-URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
-SECRET_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|secret|token|passwd|password)\s*[:=]\s*[\"']?([A-Za-z0-9_\-+/=]{8,})"
-)
 MANIFEST_PACKAGE_PATTERN = re.compile(r'package\s*=\s*"([^"]+)"')
 MANIFEST_VERSION_NAME_PATTERN = re.compile(r'android:versionName\s*=\s*"([^"]+)"')
 MANIFEST_VERSION_CODE_PATTERN = re.compile(r'android:versionCode\s*=\s*"([^"]+)"')

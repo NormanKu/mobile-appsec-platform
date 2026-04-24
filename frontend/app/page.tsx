@@ -102,6 +102,14 @@ export default function HomePage() {
       return;
     }
 
+    const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB — matches backend APPSEC_MAX_UPLOAD_SIZE_BYTES
+    if (file.size > MAX_FILE_SIZE) {
+      setErrorCode("FILE_TOO_LARGE");
+      setError(`File size (${(file.size / 1024 / 1024).toFixed(1)} MB) exceeds the ${MAX_FILE_SIZE / 1024 / 1024} MB limit.`);
+      setErrorDetails(null);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setErrorCode(null);

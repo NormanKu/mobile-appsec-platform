@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timezone
 
 from analyzers.android.scanner import analyze_android_package
@@ -8,6 +9,8 @@ from app.errors.exceptions import UploadValidationError
 from app.models.report import CategorySummary, Metadata, NormalizedAnalysisReport, Summary
 
 logger = logging.getLogger(__name__)
+
+_CONFIDENCE_PREFIX_RE = re.compile(r"^(Confirmed|Heuristic|Informational):\s*", re.IGNORECASE)
 
 RISK_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_SCORE_PENALTY = {"low": 5, "medium": 12, "high": 22, "critical": 35}
@@ -22,10 +25,27 @@ ARCHIVE_LIMIT_FINDING_IDS = {"ANDROID-ARCHIVE-BOMB", "IOS-ARCHIVE-BOMB"}
 
 
 def _enrich_finding_sources(findings: list[dict[str, object]], platform: str) -> list[dict[str, object]]:
+    """Normalize finding metadata across all platforms.
+
+    Ensures every finding has confidence_level, evidence, detection_method,
+    and source_location. If the title contains a confidence prefix (e.g.
+    "Heuristic: ..."), extract it into confidence_level and clean the title
+    for consistent API output across iOS and Android.
+    """
     default_source = "android-analyzer" if platform == "android" else "ios-analyzer"
     for finding in findings:
         source = str(finding.setdefault("source", default_source))
-        finding.setdefault("confidence_level", "heuristic")
+
+        # Extract confidence from title prefix if not explicitly set
+        title = str(finding.get("title", ""))
+        prefix_match = _CONFIDENCE_PREFIX_RE.match(title)
+        if prefix_match:
+            extracted_confidence = prefix_match.group(1).lower()
+            finding.setdefault("confidence_level", extracted_confidence)
+            finding["title"] = _CONFIDENCE_PREFIX_RE.sub("", title)
+        else:
+            finding.setdefault("confidence_level", "heuristic")
+
         finding.setdefault("evidence", [])
         finding.setdefault("detection_method", _infer_detection_method(finding_id=str(finding["id"]), platform=platform))
         if "source_location" not in finding or finding["source_location"] is None:

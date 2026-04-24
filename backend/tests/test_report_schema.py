@@ -14,13 +14,9 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def disable_rate_limiter() -> None:
-    original_enabled = limiter.enabled
-    limiter.enabled = False
+def disable_rate_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(limiter, "enabled", False)
     limiter.reset()
-    yield
-    limiter.reset()
-    limiter.enabled = original_enabled
 
 
 def _assert_error_response(payload: dict, expected_code: str) -> None:

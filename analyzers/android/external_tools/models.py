@@ -20,4 +20,5 @@ class AndroidExternalToolResult:
     executed: bool
     signals: tuple[AndroidExternalToolSignal, ...] = ()
     source_files_scanned: int = 0
+    skipped_files: int = 0
     error: str | None = None

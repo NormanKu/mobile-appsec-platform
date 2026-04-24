@@ -61,8 +61,21 @@ async def upload_binary(request: Request, file: UploadFile = File(...)) -> Norma
         )
     except UploadValidationError:
         raise
-    except Exception as exc:
-        logger.exception("Unexpected upload analysis failure for %s", file_name)
+    except TimeoutError as exc:
+        logger.warning("Analysis timed out for %s", file_name)
+        raise UploadValidationError(
+            code="ANALYSIS_TIMEOUT",
+            message="Static analysis timed out",
+            status_code=500,
+            details={
+                "file_name": file_name,
+                "platform": platform,
+                "stage": "upload-route",
+                "reason": "Analysis exceeded time limit",
+            },
+        ) from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.exception("Upload analysis failure for %s: %s", file_name, exc)
         raise UploadValidationError(
             code="ANALYSIS_FAILED",
             message="Static analysis could not be completed safely",
@@ -71,7 +84,7 @@ async def upload_binary(request: Request, file: UploadFile = File(...)) -> Norma
                 "file_name": file_name,
                 "platform": platform,
                 "stage": "upload-route",
-                "reason": "Unexpected upload analysis failure",
+                "reason": str(exc),
             },
         ) from exc
     return report

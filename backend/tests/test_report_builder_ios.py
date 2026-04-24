@@ -55,8 +55,13 @@ def test_report_builder_routes_ios_and_returns_extended_shape() -> None:
     assert all("confidence_level" in finding for finding in payload["findings"])
     assert all("evidence" in finding for finding in payload["findings"])
     assert all("detection_method" in finding for finding in payload["findings"])
+    # Confidence prefixes are now extracted into confidence_level and stripped from titles
     assert all(
-        finding["title"].startswith(("Confirmed:", "Heuristic:", "Informational:"))
+        finding["confidence_level"] in ("confirmed", "heuristic", "informational")
+        for finding in payload["findings"]
+    )
+    assert all(
+        not finding["title"].startswith(("Confirmed:", "Heuristic:", "Informational:"))
         for finding in payload["findings"]
     )
     assert sum(c["count"] for c in payload["categories"]) == payload["summary"]["total_findings"]
