@@ -45,7 +45,10 @@ class AndroidPackageMetadata:
 
 
 def analyze_android_package(
-    file_name: str, file_bytes: bytes, file_extension: str
+    file_name: str,
+    file_bytes: bytes,
+    file_extension: str,
+    max_extracted_bytes: int | None = None,
 ) -> list[dict[str, str]]:
     extension = file_extension.lower()
     if extension not in {".apk", ".aab"}:
@@ -63,7 +66,10 @@ def analyze_android_package(
 
     try:
         with ZipFile(BytesIO(file_bytes), "r") as archive:
-            validate_zip_limits(archive)
+            if max_extracted_bytes is None:
+                validate_zip_limits(archive)
+            else:
+                validate_zip_limits(archive, max_extracted_bytes=max_extracted_bytes)
             metadata = _extract_basic_metadata(extension=extension, archive=archive, file_bytes=file_bytes)
             findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
             findings.extend(_inspect_manifest(archive=archive, metadata=metadata))

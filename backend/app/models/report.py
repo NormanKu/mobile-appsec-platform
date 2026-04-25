@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, model_validator
 Severity = Literal["low", "medium", "high", "critical"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 Platform = Literal["android", "ios"]
+PolicyDecision = Literal["pass", "warn", "fail"]
+PolicyRuleStatus = Literal["pass", "warn", "fail"]
 
 
 class Finding(BaseModel):
@@ -16,6 +18,21 @@ class Finding(BaseModel):
     description: str = Field(..., examples=["android:debuggable is true in release manifest"])
     recommendation: str = Field(..., examples=["Set android:debuggable=false for release builds"])
     source: str = Field(..., examples=["AndroidManifest.xml"])
+
+
+class PolicyRuleResult(BaseModel):
+    id: str
+    name: str
+    status: PolicyRuleStatus
+    message: str
+    finding_ids: list[str] = Field(default_factory=list)
+
+
+class PolicyEvaluation(BaseModel):
+    decision: PolicyDecision
+    min_score: int = Field(..., ge=0, le=100)
+    rules: list[PolicyRuleResult] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class Summary(BaseModel):
@@ -46,6 +63,7 @@ class NormalizedAnalysisReport(BaseModel):
     summary: Summary
     findings: list[Finding] = Field(default_factory=list)
     categories: list[CategorySummary] = Field(default_factory=list)
+    policy: PolicyEvaluation | None = None
     metadata: Metadata
 
     @model_validator(mode="after")

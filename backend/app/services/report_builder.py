@@ -1,9 +1,13 @@
 from datetime import datetime, timezone
 
+from analyzers.adapters.binary_analysis import run_optional_binary_analysis
+from analyzers.adapters.mobsf import run_optional_mobsf_analysis
 from analyzers.android.scanner import analyze_android_package
 from analyzers.ios.scanner import analyze_ios_package
 
+from app.core.config import settings
 from app.models.report import CategorySummary, Metadata, NormalizedAnalysisReport, Summary
+from app.services.policy_evaluator import evaluate_policy
 
 RISK_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_SCORE_PENALTY = {"low": 5, "medium": 12, "high": 22, "critical": 35}
@@ -57,7 +61,11 @@ def _calculate_score(findings: list[dict[str, str]]) -> int:
 
 
 def build_normalized_report(
-    file_name: str, platform: str, file_bytes: bytes | None = None, file_extension: str | None = None
+    file_name: str,
+    platform: str,
+    file_bytes: bytes | None = None,
+    file_extension: str | None = None,
+    max_zip_extracted_bytes: int | None = None,
 ) -> NormalizedAnalysisReport:
     if platform == "android":
         if file_bytes is None or file_extension is None:
@@ -78,6 +86,7 @@ def build_normalized_report(
                 file_name=file_name,
                 file_bytes=file_bytes,
                 file_extension=file_extension,
+                max_extracted_bytes=max_zip_extracted_bytes,
             )
             normalized_extension = file_extension if file_extension in {".apk", ".aab"} else ".apk"
     elif platform == "ios":
@@ -99,14 +108,40 @@ def build_normalized_report(
                 file_name=file_name,
                 file_bytes=file_bytes,
                 file_extension=file_extension,
+                max_extracted_bytes=max_zip_extracted_bytes,
             )
             normalized_extension = ".ipa"
     else:
         raise ValueError(f"Unsupported platform: {platform}")
 
     findings = _enrich_finding_sources(findings, platform)
+    if file_bytes is not None and file_extension is not None:
+        findings.extend(
+            run_optional_binary_analysis(
+                enabled=settings.binary_analysis_enabled,
+                file_name=file_name,
+                file_bytes=file_bytes,
+                platform=platform,
+                file_extension=file_extension,
+                max_artifacts=settings.binary_analysis_max_artifacts,
+                max_artifact_bytes=settings.binary_analysis_max_artifact_bytes,
+            )
+        )
+    if file_bytes is not None:
+        findings.extend(
+            run_optional_mobsf_analysis(
+                enabled=settings.mobsf_enabled,
+                base_url=settings.mobsf_base_url,
+                api_key=settings.mobsf_api_key,
+                timeout_seconds=settings.mobsf_timeout_seconds,
+                re_scan=settings.mobsf_re_scan,
+                file_name=file_name,
+                file_bytes=file_bytes,
+                platform=platform,
+            )
+        )
 
-    return NormalizedAnalysisReport(
+    report = NormalizedAnalysisReport(
         platform=platform,
         file_name=file_name,
         risk_level=_calculate_risk_level(findings),
@@ -119,3 +154,5 @@ def build_normalized_report(
             file_extension=normalized_extension,
         ),
     )
+    report.policy = evaluate_policy(report)
+    return report

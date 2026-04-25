@@ -11,6 +11,17 @@ class Settings(BaseSettings):
     max_text_files_scanned: int = 200
     rate_limit_upload: str = "10/minute"
     rate_limit_default: str = "60/minute"
+    database_url: str = "sqlite:///./appsec.sqlite3"
+    default_project_name: str = "Default Project"
+    policy_min_score: int = 70
+    mobsf_enabled: bool = False
+    mobsf_base_url: str | None = None
+    mobsf_api_key: str | None = None
+    mobsf_timeout_seconds: float = 30.0
+    mobsf_re_scan: bool = False
+    binary_analysis_enabled: bool = False
+    binary_analysis_max_artifacts: int = 20
+    binary_analysis_max_artifact_bytes: int = 5 * 1024 * 1024
 
     model_config = {"env_prefix": "APPSEC_"}
 
