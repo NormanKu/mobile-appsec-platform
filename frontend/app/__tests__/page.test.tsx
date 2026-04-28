@@ -274,7 +274,7 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/test-next.apk/)).toBeDefined();
+      expect(screen.getAllByText(/test-next.apk/).length).toBeGreaterThan(0);
     });
 
     fireEvent.change(screen.getByLabelText("Baseline scan"), {
@@ -297,7 +297,7 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/test.apk/)).toBeDefined();
+      expect(screen.getAllByText(/test.apk/).length).toBeGreaterThan(0);
     });
 
     fireEvent.click(screen.getByText("Open"));
@@ -322,7 +322,7 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/test.apk/)).toBeDefined();
+      expect(screen.getAllByText(/test.apk/).length).toBeGreaterThan(0);
     });
 
     fireEvent.click(screen.getByText("Open"));

@@ -15,8 +15,12 @@ class Finding(BaseModel):
     title: str = Field(..., examples=["Debuggable flag is enabled"])
     severity: Severity = Field(..., examples=["high"])
     category: str = Field(..., examples=["configuration"])
-    description: str = Field(..., examples=["android:debuggable is true in release manifest"])
-    recommendation: str = Field(..., examples=["Set android:debuggable=false for release builds"])
+    description: str = Field(
+        ..., examples=["android:debuggable is true in release manifest"]
+    )
+    recommendation: str = Field(
+        ..., examples=["Set android:debuggable=false for release builds"]
+    )
     source: str = Field(..., examples=["AndroidManifest.xml"])
 
 

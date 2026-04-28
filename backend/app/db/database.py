@@ -162,7 +162,9 @@ def _apply_migration(connection: sqlite3.Connection, migration: dict) -> None:
     for table_name, column_name, column_definition in migration["columns"]:
         if _column_exists(connection, table_name, column_name):
             continue
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
 
     connection.execute(
         """
@@ -185,6 +187,8 @@ def _migration_applied(connection: sqlite3.Connection, migration_id: str) -> boo
     return row is not None
 
 
-def _column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+def _column_exists(
+    connection: sqlite3.Connection, table_name: str, column_name: str
+) -> bool:
     rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     return any(row["name"] == column_name for row in rows)

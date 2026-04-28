@@ -105,9 +105,20 @@ def test_upload_endpoint_returns_extended_schema_for_apk() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["platform"] == "android"
-    assert {"platform", "file_name", "risk_level", "score", "summary", "findings", "categories", "metadata"}.issubset(payload.keys())
+    assert {
+        "platform",
+        "file_name",
+        "risk_level",
+        "score",
+        "summary",
+        "findings",
+        "categories",
+        "metadata",
+    }.issubset(payload.keys())
     assert payload["summary"]["total_findings"] == len(payload["findings"])
-    assert sum(category["count"] for category in payload["categories"]) == len(payload["findings"])
+    assert sum(category["count"] for category in payload["categories"]) == len(
+        payload["findings"]
+    )
     assert all("source" in finding for finding in payload["findings"])
 
 
@@ -140,7 +151,9 @@ def test_upload_endpoint_missing_file_returns_consistent_error() -> None:
     _assert_error_response(response.json(), "MISSING_FILE")
 
 
-def test_upload_endpoint_rejects_oversized_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_endpoint_rejects_oversized_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "max_upload_size_bytes", 4)
 
     response = client.post(

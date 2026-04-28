@@ -66,9 +66,13 @@ def compare_scans(
         baseline_scan = store.get_scan(baseline_ref.scan_id)
         target_scan = store.get_scan(target_ref.scan_id)
         if baseline_scan is not None and baseline_scan.status == "failed":
-            raise ScanComparisonError("Baseline scan failed and has no completed result", status_code=409)
+            raise ScanComparisonError(
+                "Baseline scan failed and has no completed result", status_code=409
+            )
         if target_scan is not None and target_scan.status == "failed":
-            raise ScanComparisonError("Target scan failed and has no completed result", status_code=409)
+            raise ScanComparisonError(
+                "Target scan failed and has no completed result", status_code=409
+            )
         raise ScanComparisonError("Scan result not found", status_code=404)
 
     return compare_reports(
@@ -105,7 +109,9 @@ def compare_reports(
 
     for target_item in target_items:
         candidates = baseline_by_key.get(target_item.key, [])
-        candidate = next((item for item in candidates if item.index not in matched_baseline), None)
+        candidate = next(
+            (item for item in candidates if item.index not in matched_baseline), None
+        )
         if candidate is None:
             continue
 
@@ -125,8 +131,12 @@ def compare_reports(
                 )
             )
 
-    unmatched_baseline = [item for item in baseline_items if item.index not in matched_baseline]
-    unmatched_target = [item for item in target_items if item.index not in matched_target]
+    unmatched_baseline = [
+        item for item in baseline_items if item.index not in matched_baseline
+    ]
+    unmatched_target = [
+        item for item in target_items if item.index not in matched_target
+    ]
     uncertain_matches = _find_uncertain_matches(unmatched_baseline, unmatched_target)
 
     return ScanComparison(
@@ -196,7 +206,9 @@ def _find_uncertain_matches(
                 target_item.finding,
             )
             if score > 0 and confidence and reason:
-                candidates.append((score, confidence, reason, baseline_item, target_item))
+                candidates.append(
+                    (score, confidence, reason, baseline_item, target_item)
+                )
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     used_baseline: set[int] = set()
@@ -231,7 +243,11 @@ def _uncertain_match_score(
     same_source = _normalize(baseline.source) == _normalize(target.source)
 
     if same_id and same_category:
-        return 90, "medium", "same finding id and category, but source or context changed"
+        return (
+            90,
+            "medium",
+            "same finding id and category, but source or context changed",
+        )
     if same_title and same_category and same_source:
         return 80, "medium", "same title, category, and source, but rule id changed"
     if same_title and same_category:

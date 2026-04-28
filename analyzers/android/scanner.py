@@ -70,7 +70,9 @@ def analyze_android_package(
                 validate_zip_limits(archive)
             else:
                 validate_zip_limits(archive, max_extracted_bytes=max_extracted_bytes)
-            metadata = _extract_basic_metadata(extension=extension, archive=archive, file_bytes=file_bytes)
+            metadata = _extract_basic_metadata(
+                extension=extension, archive=archive, file_bytes=file_bytes
+            )
             findings = _build_metadata_findings(file_name=file_name, metadata=metadata)
             findings.extend(_inspect_manifest(archive=archive, metadata=metadata))
             findings.extend(_scan_archive_strings(archive=archive))
@@ -101,7 +103,9 @@ def analyze_android_package(
         ]
 
 
-def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes) -> AndroidPackageMetadata:
+def _extract_basic_metadata(
+    extension: str, archive: ZipFile, file_bytes: bytes
+) -> AndroidPackageMetadata:
     names = archive.namelist()
     manifest_present = "AndroidManifest.xml" in names
     manifest_content = archive.read("AndroidManifest.xml") if manifest_present else b""
@@ -129,7 +133,9 @@ def _extract_basic_metadata(extension: str, archive: ZipFile, file_bytes: bytes)
     )
 
 
-def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
+def _build_metadata_findings(
+    file_name: str, metadata: AndroidPackageMetadata
+) -> list[dict[str, str]]:
     details = [
         f"package_type={metadata.package_type}",
         f"archive_size_bytes={metadata.archive_size_bytes}",
@@ -184,7 +190,9 @@ def _build_metadata_findings(file_name: str, metadata: AndroidPackageMetadata) -
     return findings
 
 
-def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> list[dict[str, str]]:
+def _inspect_manifest(
+    archive: ZipFile, metadata: AndroidPackageMetadata
+) -> list[dict[str, str]]:
     if not metadata.manifest_present or not metadata.manifest_decodable:
         return []
 
@@ -217,7 +225,6 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
             }
         )
 
-
     if 'android:allowBackup="true"' in manifest:
         findings.append(
             {
@@ -233,8 +240,8 @@ def _inspect_manifest(archive: ZipFile, metadata: AndroidPackageMetadata) -> lis
 
     if (
         'android:allowBackup="true"' in manifest
-        and 'android:fullBackupContent=' not in manifest
-        and 'android:dataExtractionRules=' not in manifest
+        and "android:fullBackupContent=" not in manifest
+        and "android:dataExtractionRules=" not in manifest
     ):
         findings.append(
             {

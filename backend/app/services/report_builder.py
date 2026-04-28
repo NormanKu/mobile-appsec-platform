@@ -6,14 +6,21 @@ from analyzers.android.scanner import analyze_android_package
 from analyzers.ios.scanner import analyze_ios_package
 
 from app.core.config import settings
-from app.models.report import CategorySummary, Metadata, NormalizedAnalysisReport, Summary
+from app.models.report import (
+    CategorySummary,
+    Metadata,
+    NormalizedAnalysisReport,
+    Summary,
+)
 from app.services.policy_evaluator import evaluate_policy
 
 RISK_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_SCORE_PENALTY = {"low": 5, "medium": 12, "high": 22, "critical": 35}
 
 
-def _enrich_finding_sources(findings: list[dict[str, str]], platform: str) -> list[dict[str, str]]:
+def _enrich_finding_sources(
+    findings: list[dict[str, str]], platform: str
+) -> list[dict[str, str]]:
     default_source = "android-analyzer" if platform == "android" else "ios-analyzer"
     for finding in findings:
         finding.setdefault("source", default_source)
@@ -43,7 +50,9 @@ def _calculate_categories(findings: list[dict[str, str]]) -> list[CategorySummar
             grouped[category]["max_severity"] = severity
 
     return [
-        CategorySummary(name=name, count=int(data["count"]), max_severity=str(data["max_severity"]))
+        CategorySummary(
+            name=name, count=int(data["count"]), max_severity=str(data["max_severity"])
+        )
         for name, data in sorted(grouped.items())
     ]
 
@@ -88,7 +97,9 @@ def build_normalized_report(
                 file_extension=file_extension,
                 max_extracted_bytes=max_zip_extracted_bytes,
             )
-            normalized_extension = file_extension if file_extension in {".apk", ".aab"} else ".apk"
+            normalized_extension = (
+                file_extension if file_extension in {".apk", ".aab"} else ".apk"
+            )
     elif platform == "ios":
         if file_bytes is None or file_extension is None:
             findings = [

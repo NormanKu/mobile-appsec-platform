@@ -1,4 +1,5 @@
 """Make backend/app importable when running pytest from repo root."""
+
 import sys
 from pathlib import Path
 
@@ -11,4 +12,6 @@ from app.core.config import settings  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path / 'appsec-test.sqlite3'}")
+    monkeypatch.setattr(
+        settings, "database_url", f"sqlite:///{tmp_path / 'appsec-test.sqlite3'}"
+    )

@@ -27,11 +27,9 @@ class BinaryArtifact:
 class BinaryAnalysisAdapter(Protocol):
     name: str
 
-    def supports(self, artifact: BinaryArtifact) -> bool:
-        ...
+    def supports(self, artifact: BinaryArtifact) -> bool: ...
 
-    def analyze(self, artifact: BinaryArtifact) -> list[dict[str, str]]:
-        ...
+    def analyze(self, artifact: BinaryArtifact) -> list[dict[str, str]]: ...
 
 
 class BinaryAnalysisError(Exception):
@@ -109,7 +107,8 @@ class BinaryMetadataAdapter:
                 "title": "Binary metadata extracted",
                 "severity": "low",
                 "category": "binary-metadata",
-                "description": "Extracted lightweight binary metadata: " + ", ".join(details),
+                "description": "Extracted lightweight binary metadata: "
+                + ", ".join(details),
                 "recommendation": (
                     "Use a deeper binary-analysis adapter for symbol, control-flow, "
                     "and vulnerability-oriented inspection"
@@ -201,7 +200,9 @@ def _extract_android_artifacts(
             for entry in archive.infolist():
                 if len(artifacts) >= max_artifacts:
                     break
-                if entry.is_dir() or not ANDROID_NATIVE_LIBRARY_PATTERN.search(entry.filename):
+                if entry.is_dir() or not ANDROID_NATIVE_LIBRARY_PATTERN.search(
+                    entry.filename
+                ):
                     continue
                 artifact = _read_artifact(
                     archive=archive,
@@ -326,8 +327,14 @@ def _detect_binary_format(data: bytes) -> dict[str, str]:
 
 
 def _detect_elf_metadata(data: bytes) -> dict[str, str]:
-    bits = {"1": "32-bit", "2": "64-bit"}.get(str(data[4]), "unknown") if len(data) > 4 else ""
-    endianness = {"1": "little", "2": "big"}.get(str(data[5]), "") if len(data) > 5 else ""
+    bits = (
+        {"1": "32-bit", "2": "64-bit"}.get(str(data[4]), "unknown")
+        if len(data) > 4
+        else ""
+    )
+    endianness = (
+        {"1": "little", "2": "big"}.get(str(data[5]), "") if len(data) > 5 else ""
+    )
     byteorder = "big" if endianness == "big" else "little"
     machine = int.from_bytes(data[18:20], byteorder=byteorder) if len(data) >= 20 else 0
     architecture = {
@@ -348,9 +355,19 @@ def _detect_elf_metadata(data: bytes) -> dict[str, str]:
 def _detect_macho_metadata(data: bytes) -> dict[str, str]:
     magic = data[:4]
     if magic == b"\xca\xfe\xba\xbe":
-        return {"format": "fat-mach-o", "bits": "multi-arch", "architecture": "", "endianness": "big"}
+        return {
+            "format": "fat-mach-o",
+            "bits": "multi-arch",
+            "architecture": "",
+            "endianness": "big",
+        }
     if magic == b"\xbe\xba\xfe\xca":
-        return {"format": "fat-mach-o", "bits": "multi-arch", "architecture": "", "endianness": "little"}
+        return {
+            "format": "fat-mach-o",
+            "bits": "multi-arch",
+            "architecture": "",
+            "endianness": "little",
+        }
 
     macho_magics = {
         b"\xfe\xed\xfa\xce": ("mach-o", "32-bit", "big"),
@@ -363,7 +380,11 @@ def _detect_macho_metadata(data: bytes) -> dict[str, str]:
 
     binary_format, bits, endianness = macho_magics[magic]
     byteorder = "big" if endianness == "big" else "little"
-    cputype = int.from_bytes(data[4:8], byteorder=byteorder, signed=True) if len(data) >= 8 else 0
+    cputype = (
+        int.from_bytes(data[4:8], byteorder=byteorder, signed=True)
+        if len(data) >= 8
+        else 0
+    )
     architecture = {
         7: "x86",
         12: "arm",
@@ -384,5 +405,9 @@ def _unknown_metadata() -> dict[str, str]:
 
 
 def _finding_id(artifact: BinaryArtifact, suffix: str) -> str:
-    digest = sha1(f"{artifact.platform}|{artifact.path}|{suffix}".encode("utf-8")).hexdigest()[:10].upper()
+    digest = (
+        sha1(f"{artifact.platform}|{artifact.path}|{suffix}".encode("utf-8"))
+        .hexdigest()[:10]
+        .upper()
+    )
     return f"BINARY-{artifact.platform.upper()}-{suffix}-{digest}"

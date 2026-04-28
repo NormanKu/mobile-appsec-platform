@@ -83,7 +83,9 @@ class MobSFAdapter:
             content_type="application/x-www-form-urlencoded",
         )
 
-    def _request_json(self, path: str, body: bytes, content_type: str) -> dict[str, Any]:
+    def _request_json(
+        self, path: str, body: bytes, content_type: str
+    ) -> dict[str, Any]:
         url = f"{self.config.base_url.rstrip('/')}{path}"
         req = request.Request(
             url,
@@ -105,16 +107,24 @@ class MobSFAdapter:
         try:
             decoded = json.loads(payload.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise MobSFAdapterError(f"MobSF returned non-JSON response for {path}") from exc
+            raise MobSFAdapterError(
+                f"MobSF returned non-JSON response for {path}"
+            ) from exc
 
         if not isinstance(decoded, dict):
-            raise MobSFAdapterError(f"MobSF returned unexpected response type for {path}")
+            raise MobSFAdapterError(
+                f"MobSF returned unexpected response type for {path}"
+            )
         if "error" in decoded:
-            raise MobSFAdapterError(f"MobSF returned error for {path}: {decoded['error']}")
+            raise MobSFAdapterError(
+                f"MobSF returned error for {path}: {decoded['error']}"
+            )
         return decoded
 
 
-def normalize_mobsf_findings(report: dict[str, Any], platform: str) -> list[dict[str, str]]:
+def normalize_mobsf_findings(
+    report: dict[str, Any], platform: str
+) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -157,7 +167,9 @@ def run_optional_mobsf_analysis(
     if not enabled:
         return []
     if not base_url or not api_key:
-        logger.info("MobSF analysis skipped because base URL or API key is not configured")
+        logger.info(
+            "MobSF analysis skipped because base URL or API key is not configured"
+        )
         return []
 
     adapter = MobSFAdapter(
@@ -169,7 +181,9 @@ def run_optional_mobsf_analysis(
         )
     )
     try:
-        return adapter.analyze(file_name=file_name, file_bytes=file_bytes, platform=platform)
+        return adapter.analyze(
+            file_name=file_name, file_bytes=file_bytes, platform=platform
+        )
     except MobSFAdapterError as exc:
         logger.warning("MobSF analysis unavailable: %s", exc)
         return []
@@ -193,6 +207,7 @@ def _iter_finding_like_items(
 
     if _looks_like_finding(value, inherited_severity):
         items.append((value, inherited_severity))
+        return items
 
     for key, child in value.items():
         child_severity = _normalize_severity(key) or inherited_severity
@@ -202,7 +217,9 @@ def _iter_finding_like_items(
 
 def _looks_like_finding(value: dict[str, Any], inherited_severity: str | None) -> bool:
     keys = {_normalize_key(key) for key in value}
-    has_severity = inherited_severity is not None or bool(keys & {"severity", "risk", "level", "cvss"})
+    has_severity = inherited_severity is not None or bool(
+        keys & {"severity", "risk", "level", "cvss"}
+    )
     has_title = bool(keys & {"title", "name", "rule", "issue", "finding"})
     has_details = bool(keys & {"description", "desc", "details", "message", "info"})
     return has_severity and (has_title or has_details)
@@ -214,13 +231,19 @@ def _normalize_finding_item(
     platform: str,
     inherited_severity: str | None,
 ) -> dict[str, str] | None:
-    severity = _normalize_severity(_first_value(item, ["severity", "risk", "level", "cvss"]))
+    severity = _normalize_severity(
+        _first_value(item, ["severity", "risk", "level", "cvss"])
+    )
     severity = severity or inherited_severity
     if severity is None:
         return None
 
-    title = _stringify(_first_value(item, ["title", "name", "rule", "issue", "finding"]))
-    description = _stringify(_first_value(item, ["description", "desc", "details", "message", "info"]))
+    title = _stringify(
+        _first_value(item, ["title", "name", "rule", "issue", "finding"])
+    )
+    description = _stringify(
+        _first_value(item, ["description", "desc", "details", "message", "info"])
+    )
     if not title and description:
         title = description[:96]
     if not title:
@@ -235,11 +258,16 @@ def _normalize_finding_item(
         source = f"{source}:{path}"
 
     description = description or f"MobSF reported {title}"
-    recommendation = recommendation or "Review the MobSF finding and validate exploitability in release context"
+    recommendation = (
+        recommendation
+        or "Review the MobSF finding and validate exploitability in release context"
+    )
     category = f"mobsf-{_normalize_key(section_name)}"
 
     return {
-        "id": _finding_id(platform=platform, section=section_name, title=title, source=source),
+        "id": _finding_id(
+            platform=platform, section=section_name, title=title, source=source
+        ),
         "title": f"MobSF: {title}",
         "severity": severity,
         "category": category,
@@ -294,7 +322,9 @@ def _multipart_body(file_name: str, file_bytes: bytes) -> tuple[bytes, str]:
 
 
 def _finding_id(platform: str, section: str, title: str, source: str) -> str:
-    digest = sha1(f"{section}|{title}|{source}".encode("utf-8")).hexdigest()[:10].upper()
+    digest = (
+        sha1(f"{section}|{title}|{source}".encode("utf-8")).hexdigest()[:10].upper()
+    )
     return f"MOBSF-{platform.upper()}-{_normalize_key(section).upper()}-{digest}"
 
 

@@ -8,7 +8,11 @@ from slowapi.util import get_remote_address
 
 from app.core.config import settings
 from app.models.error import ErrorResponse
-from app.models.report import IOS_EXAMPLE_REPORT, ANDROID_EXAMPLE_REPORT, NormalizedAnalysisReport
+from app.models.report import (
+    IOS_EXAMPLE_REPORT,
+    ANDROID_EXAMPLE_REPORT,
+    NormalizedAnalysisReport,
+)
 from app.errors.exceptions import UploadValidationError
 from app.services.report_builder import build_normalized_report
 from app.services.scan_history import ScanHistoryStore
@@ -28,14 +32,23 @@ logger = logging.getLogger(__name__)
             "content": {
                 "application/json": {
                     "examples": {
-                        "android": {"summary": "Android example", "value": ANDROID_EXAMPLE_REPORT},
+                        "android": {
+                            "summary": "Android example",
+                            "value": ANDROID_EXAMPLE_REPORT,
+                        },
                         "ios": {"summary": "iOS example", "value": IOS_EXAMPLE_REPORT},
                     }
                 }
             },
         },
-        400: {"model": ErrorResponse, "description": "Invalid upload request or malformed archive"},
-        413: {"model": ErrorResponse, "description": "Upload too large or archive exceeds safe extraction limits"},
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid upload request or malformed archive",
+        },
+        413: {
+            "model": ErrorResponse,
+            "description": "Upload too large or archive exceeds safe extraction limits",
+        },
         422: {"model": ErrorResponse, "description": "Validation error"},
         500: {"model": ErrorResponse, "description": "Analysis or persistence failed"},
     },

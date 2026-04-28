@@ -26,7 +26,11 @@ def _elf64_arm64_bytes(extra: bytes = b"") -> bytes:
 
 
 def _macho64_arm64_bytes() -> bytes:
-    return b"\xcf\xfa\xed\xfe" + (16777228).to_bytes(4, byteorder="little", signed=True) + b"\0" * 64
+    return (
+        b"\xcf\xfa\xed\xfe"
+        + (16777228).to_bytes(4, byteorder="little", signed=True)
+        + b"\0" * 64
+    )
 
 
 def _android_package_with_native_library(binary: bytes | None = None) -> bytes:
@@ -70,14 +74,18 @@ def test_binary_metadata_adapter_routes_android_native_library() -> None:
     findings = run_optional_binary_analysis(
         enabled=True,
         file_name="sample.apk",
-        file_bytes=_android_package_with_native_library(b"http://example.test" + _elf64_arm64_bytes()),
+        file_bytes=_android_package_with_native_library(
+            _elf64_arm64_bytes(b"http://example.test")
+        ),
         platform="android",
         file_extension=".apk",
     )
 
     assert any(finding["category"] == "binary-metadata" for finding in findings)
     assert any(finding["category"] == "binary-network" for finding in findings)
-    metadata = next(finding for finding in findings if finding["category"] == "binary-metadata")
+    metadata = next(
+        finding for finding in findings if finding["category"] == "binary-metadata"
+    )
     assert metadata["id"].startswith("BINARY-ANDROID-METADATA-")
     assert metadata["source"] == "binary-metadata/lib/arm64-v8a/libnative.so"
     assert "format=elf" in metadata["description"]
@@ -156,6 +164,9 @@ def test_report_builder_appends_binary_findings_when_enabled(monkeypatch) -> Non
         file_extension=".apk",
     )
 
-    assert any(finding.source == "binary-metadata/lib/arm64-v8a/libnative.so" for finding in report.findings)
+    assert any(
+        finding.source == "binary-metadata/lib/arm64-v8a/libnative.so"
+        for finding in report.findings
+    )
     assert report.summary.total_findings == len(report.findings)
     assert any(category.name == "binary-metadata" for category in report.categories)

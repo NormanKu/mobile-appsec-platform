@@ -2,7 +2,13 @@ from typing import Any
 
 
 class UploadValidationError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400, details: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int = 400,
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message

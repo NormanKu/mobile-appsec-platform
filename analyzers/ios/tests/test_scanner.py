@@ -33,7 +33,9 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_and_string_findings() -> None:
     strings = "client_secret=supersecretvalue\nendpoint=https://api.example.com\nlegacy=http://legacy.example.com"
     file_name, file_bytes, ext = _build_ipa(info_plist, strings)
 
-    findings = analyze_ios_package(file_name=file_name, file_bytes=file_bytes, file_extension=ext)
+    findings = analyze_ios_package(
+        file_name=file_name, file_bytes=file_bytes, file_extension=ext
+    )
     ids = {f["id"] for f in findings}
 
     assert "IOS-METADATA-001" in ids
@@ -47,13 +49,17 @@ def test_ios_ipa_analyzer_extracts_metadata_plist_and_string_findings() -> None:
 
 
 def test_ios_requires_ipa_extension() -> None:
-    findings = analyze_ios_package(file_name="sample.zip", file_bytes=b"PK\x03\x04", file_extension=".zip")
+    findings = analyze_ios_package(
+        file_name="sample.zip", file_bytes=b"PK\x03\x04", file_extension=".zip"
+    )
 
     assert findings[0]["id"] == "IOS-FORMAT-001"
 
 
 def test_invalid_ipa_returns_critical_finding() -> None:
-    findings = analyze_ios_package(file_name="bad.ipa", file_bytes=b"not-a-zip", file_extension=".ipa")
+    findings = analyze_ios_package(
+        file_name="bad.ipa", file_bytes=b"not-a-zip", file_extension=".ipa"
+    )
 
     assert findings[0]["id"] == "IOS-ARCHIVE-001"
     assert findings[0]["severity"] == "critical"

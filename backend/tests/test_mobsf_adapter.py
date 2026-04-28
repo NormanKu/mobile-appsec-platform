@@ -38,7 +38,11 @@ def test_normalize_mobsf_findings_maps_common_report_shapes() -> None:
     findings = mobsf.normalize_mobsf_findings(report, platform="android")
 
     assert len(findings) == 3
-    assert {finding["severity"] for finding in findings} == {"high", "medium", "critical"}
+    assert {finding["severity"] for finding in findings} == {
+        "high",
+        "medium",
+        "critical",
+    }
     assert all(finding["title"].startswith("MobSF: ") for finding in findings)
     assert all(finding["source"].startswith("mobsf/") for finding in findings)
     assert any(
@@ -173,7 +177,9 @@ def test_report_builder_appends_mobsf_findings_when_enabled(monkeypatch) -> None
     monkeypatch.setattr(settings, "mobsf_enabled", True)
     monkeypatch.setattr(settings, "mobsf_base_url", "http://localhost:8000")
     monkeypatch.setattr(settings, "mobsf_api_key", "secret")
-    monkeypatch.setattr(report_builder, "run_optional_mobsf_analysis", fake_mobsf_analysis)
+    monkeypatch.setattr(
+        report_builder, "run_optional_mobsf_analysis", fake_mobsf_analysis
+    )
 
     report = report_builder.build_normalized_report(
         file_name="sample.apk",

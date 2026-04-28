@@ -45,7 +45,9 @@ def _report() -> NormalizedAnalysisReport:
     )
 
 
-def test_initialize_database_migrates_legacy_schema_and_records_migrations(tmp_path) -> None:
+def test_initialize_database_migrates_legacy_schema_and_records_migrations(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "legacy.sqlite3"
     db_url = f"sqlite:///{db_path}"
     connection = sqlite3.connect(db_path)
@@ -107,13 +109,21 @@ def test_initialize_database_migrates_legacy_schema_and_records_migrations(tmp_p
     initialize_database(db_url)
 
     with closing(connect(db_url)) as migrated:
-        scan_columns = {row["name"] for row in migrated.execute("PRAGMA table_info(scans)").fetchall()}
-        version_columns = {
-            row["name"] for row in migrated.execute("PRAGMA table_info(app_versions)").fetchall()
+        scan_columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(scans)").fetchall()
         }
-        migrations = migrated.execute("SELECT id FROM schema_migrations ORDER BY id").fetchall()
+        version_columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(app_versions)").fetchall()
+        }
+        migrations = migrated.execute(
+            "SELECT id FROM schema_migrations ORDER BY id"
+        ).fetchall()
 
-    assert {"file_name", "file_extension", "error_code", "error_message"}.issubset(scan_columns)
+    assert {"file_name", "file_extension", "error_code", "error_message"}.issubset(
+        scan_columns
+    )
     assert {"build_identifier", "file_name", "file_extension"}.issubset(version_columns)
     assert [row["id"] for row in migrations] == [
         "001_app_version_build_metadata",
@@ -210,7 +220,9 @@ def test_upload_core_analysis_failure_persists_failed_scan(monkeypatch) -> None:
 
 def test_historical_report_payload_is_repaired_on_retrieval() -> None:
     store = ScanHistoryStore()
-    scan = store.save_report(_report(), project_name="Legacy", app_name="Wallet", version_name="1.0.0")
+    scan = store.save_report(
+        _report(), project_name="Legacy", app_name="Wallet", version_name="1.0.0"
+    )
     legacy_payload = _report().model_dump(mode="json")
     legacy_payload["summary"] = {
         "total_findings": 0,

@@ -33,9 +33,19 @@ def test_report_builder_routes_ios_and_returns_extended_shape() -> None:
     payload = report.model_dump()
     assert payload["platform"] == "ios"
     assert payload["file_name"] == "sample.ipa"
-    assert {"platform", "file_name", "risk_level", "score", "summary", "findings", "categories", "metadata"}.issubset(
-        payload.keys()
-    )
+    assert {
+        "platform",
+        "file_name",
+        "risk_level",
+        "score",
+        "summary",
+        "findings",
+        "categories",
+        "metadata",
+    }.issubset(payload.keys())
     assert isinstance(payload["score"], int)
     assert all("source" in finding for finding in payload["findings"])
-    assert sum(c["count"] for c in payload["categories"]) == payload["summary"]["total_findings"]
+    assert (
+        sum(c["count"] for c in payload["categories"])
+        == payload["summary"]["total_findings"]
+    )

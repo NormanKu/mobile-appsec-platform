@@ -18,9 +18,13 @@ SEVERITIES = ("low", "medium", "high", "critical")
 
 
 class ScanHistoryStore:
-    def __init__(self, database_url: str | None = None, default_project_name: str | None = None):
+    def __init__(
+        self, database_url: str | None = None, default_project_name: str | None = None
+    ):
         self.database_url = database_url or settings.database_url
-        self.default_project_name = default_project_name or settings.default_project_name
+        self.default_project_name = (
+            default_project_name or settings.default_project_name
+        )
 
     def list_projects(self) -> list[Project]:
         initialize_database(self.database_url)
@@ -117,10 +121,14 @@ class ScanHistoryStore:
     ) -> Scan:
         initialize_database(self.database_url)
         now = _utc_now()
+        if report.policy is None:
+            report.policy = evaluate_policy(report)
 
         with closing(connect(self.database_url)) as connection:
             with connection:
-                project = self._resolve_project(connection, project_id, project_name, now)
+                project = self._resolve_project(
+                    connection, project_id, project_name, now
+                )
                 mobile_app = self._resolve_mobile_app(
                     connection,
                     project,
@@ -138,7 +146,9 @@ class ScanHistoryStore:
                     build_identifier=build_identifier,
                     now=now,
                 )
-                scan = self._create_completed_scan(connection, app_version.id, report, now)
+                scan = self._create_completed_scan(
+                    connection, app_version.id, report, now
+                )
                 self._create_scan_result(connection, scan.id, report, now)
                 self._create_findings(connection, scan.id, report)
                 return scan
@@ -163,7 +173,9 @@ class ScanHistoryStore:
 
         with closing(connect(self.database_url)) as connection:
             with connection:
-                project = self._resolve_project(connection, project_id, project_name, now)
+                project = self._resolve_project(
+                    connection, project_id, project_name, now
+                )
                 mobile_app = self._resolve_mobile_app_for_upload(
                     connection=connection,
                     project=project,
@@ -259,7 +271,9 @@ class ScanHistoryStore:
     def get_scan(self, scan_id: str) -> Scan | None:
         initialize_database(self.database_url)
         with closing(connect(self.database_url)) as connection:
-            row = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()
         return _row_to_scan(row) if row else None
 
     def get_report(self, scan_id: str) -> NormalizedAnalysisReport | None:
@@ -314,10 +328,14 @@ class ScanHistoryStore:
             if mobile_app.project_id != project.id:
                 raise ValueError("App does not belong to the selected project")
             if mobile_app.platform != report.platform:
-                raise ValueError("Selected app platform does not match uploaded package")
+                raise ValueError(
+                    "Selected app platform does not match uploaded package"
+                )
             return mobile_app
 
-        resolved_name = _clean_text(app_name) or Path(report.file_name).stem or report.file_name
+        resolved_name = (
+            _clean_text(app_name) or Path(report.file_name).stem or report.file_name
+        )
         return self._get_or_create_mobile_app(
             connection,
             project.id,
@@ -343,7 +361,9 @@ class ScanHistoryStore:
             if mobile_app.project_id != project.id:
                 raise ValueError("App does not belong to the selected project")
             if mobile_app.platform != platform:
-                raise ValueError("Selected app platform does not match uploaded package")
+                raise ValueError(
+                    "Selected app platform does not match uploaded package"
+                )
             return mobile_app
 
         resolved_name = _clean_text(app_name) or Path(file_name).stem or file_name
@@ -414,8 +434,12 @@ class ScanHistoryStore:
             now=now,
         )
 
-    def _get_project(self, connection: sqlite3.Connection, project_id: str) -> Project | None:
-        row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    def _get_project(
+        self, connection: sqlite3.Connection, project_id: str
+    ) -> Project | None:
+        row = connection.execute(
+            "SELECT * FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
         return _row_to_project(row) if row else None
 
     def _get_or_create_project(
@@ -431,11 +455,17 @@ class ScanHistoryStore:
             """,
             (_new_id(), name, _format_datetime(now)),
         )
-        row = connection.execute("SELECT * FROM projects WHERE name = ?", (name,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM projects WHERE name = ?", (name,)
+        ).fetchone()
         return _row_to_project(row)
 
-    def _get_mobile_app(self, connection: sqlite3.Connection, app_id: str) -> MobileApp | None:
-        row = connection.execute("SELECT * FROM mobile_apps WHERE id = ?", (app_id,)).fetchone()
+    def _get_mobile_app(
+        self, connection: sqlite3.Connection, app_id: str
+    ) -> MobileApp | None:
+        row = connection.execute(
+            "SELECT * FROM mobile_apps WHERE id = ?", (app_id,)
+        ).fetchone()
         return _row_to_mobile_app(row) if row else None
 
     def _get_or_create_mobile_app(
@@ -625,7 +655,9 @@ class ScanHistoryStore:
         now: datetime,
     ) -> None:
         report_json = json.dumps(report.model_dump(mode="json"), sort_keys=True)
-        summary_json = json.dumps(report.summary.model_dump(mode="json"), sort_keys=True)
+        summary_json = json.dumps(
+            report.summary.model_dump(mode="json"), sort_keys=True
+        )
         connection.execute(
             """
             INSERT INTO scan_results (scan_id, report_json, summary_json, created_at)
@@ -668,7 +700,9 @@ class ScanHistoryStore:
 
 
 def _row_to_project(row: sqlite3.Row) -> Project:
-    return Project(id=row["id"], name=row["name"], created_at=_parse_datetime(row["created_at"]))
+    return Project(
+        id=row["id"], name=row["name"], created_at=_parse_datetime(row["created_at"])
+    )
 
 
 def _row_to_mobile_app(row: sqlite3.Row) -> MobileApp:

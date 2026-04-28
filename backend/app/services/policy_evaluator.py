@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from app.core.config import settings
-from app.models.report import Finding, NormalizedAnalysisReport, PolicyEvaluation, PolicyRuleResult
+from app.models.report import (
+    Finding,
+    NormalizedAnalysisReport,
+    PolicyEvaluation,
+    PolicyRuleResult,
+)
 
 POLICY_LIMITATIONS = [
     "Policy decisions are release gates based on static scan output, not a complete security guarantee.",
@@ -14,7 +19,9 @@ def evaluate_policy(
     report: NormalizedAnalysisReport,
     min_score: int | None = None,
 ) -> PolicyEvaluation:
-    threshold = _bounded_score(min_score if min_score is not None else settings.policy_min_score)
+    threshold = _bounded_score(
+        min_score if min_score is not None else settings.policy_min_score
+    )
     rules = [
         _fail_on_critical_confirmed(report.findings),
         _fail_on_low_score(report.score, threshold),

@@ -31,10 +31,15 @@ def list_recent_scans(
     responses={
         400: {"model": ErrorResponse, "description": "Invalid comparison request"},
         404: {"model": ErrorResponse, "description": "Scan result not found"},
-        409: {"model": ErrorResponse, "description": "Scan exists but has no completed result"},
+        409: {
+            "model": ErrorResponse,
+            "description": "Scan exists but has no completed result",
+        },
     },
 )
-def compare_scan_to_baseline(scan_id: str, baseline_scan_id: str) -> ScanComparison | JSONResponse:
+def compare_scan_to_baseline(
+    scan_id: str, baseline_scan_id: str
+) -> ScanComparison | JSONResponse:
     try:
         return compare_scans(target_scan_id=scan_id, baseline_scan_id=baseline_scan_id)
     except ScanComparisonError as exc:
@@ -44,10 +49,13 @@ def compare_scan_to_baseline(scan_id: str, baseline_scan_id: str) -> ScanCompari
                 "error": {
                     "code": "SCAN_COMPARISON_ERROR",
                     "message": str(exc),
-                    "details": {"scan_id": scan_id, "baseline_scan_id": baseline_scan_id},
+                    "details": {
+                        "scan_id": scan_id,
+                        "baseline_scan_id": baseline_scan_id,
+                    },
                 }
             },
-    )
+        )
 
 
 @router.get(
@@ -55,7 +63,10 @@ def compare_scan_to_baseline(scan_id: str, baseline_scan_id: str) -> ScanCompari
     response_model=PolicyEvaluation,
     responses={
         404: {"model": ErrorResponse, "description": "Scan result not found"},
-        409: {"model": ErrorResponse, "description": "Scan exists but has no completed result"},
+        409: {
+            "model": ErrorResponse,
+            "description": "Scan exists but has no completed result",
+        },
         422: {"model": PolicyEvaluation, "description": "Policy gate failed"},
     },
 )
@@ -94,8 +105,12 @@ def evaluate_scan_policy(
         )
 
     evaluation = evaluate_policy(report, min_score=min_score)
-    status_code = 422 if fail_on_policy_failure and evaluation.decision == "fail" else 200
-    return JSONResponse(status_code=status_code, content=evaluation.model_dump(mode="json"))
+    status_code = (
+        422 if fail_on_policy_failure and evaluation.decision == "fail" else 200
+    )
+    return JSONResponse(
+        status_code=status_code, content=evaluation.model_dump(mode="json")
+    )
 
 
 @router.get(
@@ -103,7 +118,10 @@ def evaluate_scan_policy(
     response_model=NormalizedAnalysisReport,
     responses={
         404: {"model": ErrorResponse, "description": "Scan result not found"},
-        409: {"model": ErrorResponse, "description": "Scan exists but has no completed result"},
+        409: {
+            "model": ErrorResponse,
+            "description": "Scan exists but has no completed result",
+        },
     },
 )
 def get_scan_result(scan_id: str) -> NormalizedAnalysisReport | JSONResponse:

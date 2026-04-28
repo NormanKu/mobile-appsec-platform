@@ -41,7 +41,9 @@ def _report(file_name: str, findings: list[Finding]) -> NormalizedAnalysisReport
     return NormalizedAnalysisReport(
         platform="android",
         file_name=file_name,
-        risk_level=max((finding.severity for finding in findings), key=lambda item: rank[item]),
+        risk_level=max(
+            (finding.severity for finding in findings), key=lambda item: rank[item]
+        ),
         score=70,
         summary={"total_findings": len(findings), "by_severity": by_severity},
         findings=findings,
@@ -74,23 +76,47 @@ def _scan_ref(scan_id: str, app_version_id: str, file_name: str) -> ComparisonSc
     )
 
 
-def test_compare_reports_identifies_new_resolved_unchanged_severity_and_uncertain() -> None:
+def test_compare_reports_identifies_new_resolved_unchanged_severity_and_uncertain() -> (
+    None
+):
     baseline_report = _report(
         "wallet-1.apk",
         [
-            _finding("RULE-A", "Debuggable flag", "high", "manifest", "AndroidManifest.xml"),
-            _finding("RULE-B", "Cleartext traffic", "medium", "network", "AndroidManifest.xml"),
+            _finding(
+                "RULE-A", "Debuggable flag", "high", "manifest", "AndroidManifest.xml"
+            ),
+            _finding(
+                "RULE-B",
+                "Cleartext traffic",
+                "medium",
+                "network",
+                "AndroidManifest.xml",
+            ),
             _finding("RULE-C", "Old endpoint", "low", "strings", "assets/config.txt"),
-            _finding("RULE-OLD", "Candidate token", "medium", "secrets", "assets/config.txt"),
+            _finding(
+                "RULE-OLD", "Candidate token", "medium", "secrets", "assets/config.txt"
+            ),
         ],
     )
     target_report = _report(
         "wallet-2.apk",
         [
-            _finding("RULE-A", "Debuggable flag", "high", "manifest", "AndroidManifest.xml"),
-            _finding("RULE-B", "Cleartext traffic", "critical", "network", "AndroidManifest.xml"),
-            _finding("RULE-D", "New endpoint", "medium", "strings", "assets/new-config.txt"),
-            _finding("RULE-NEW", "Candidate token", "medium", "secrets", "assets/config.txt"),
+            _finding(
+                "RULE-A", "Debuggable flag", "high", "manifest", "AndroidManifest.xml"
+            ),
+            _finding(
+                "RULE-B",
+                "Cleartext traffic",
+                "critical",
+                "network",
+                "AndroidManifest.xml",
+            ),
+            _finding(
+                "RULE-D", "New endpoint", "medium", "strings", "assets/new-config.txt"
+            ),
+            _finding(
+                "RULE-NEW", "Candidate token", "medium", "secrets", "assets/config.txt"
+            ),
         ],
     )
 
@@ -119,7 +145,10 @@ def test_compare_endpoint_requires_same_app_and_returns_diff() -> None:
     version_two = store.create_app_version(mobile_app.id, "1.1.0", "110")
 
     baseline_scan = store.save_report(
-        _report("wallet-1.apk", [_finding("RULE-A", "Debuggable flag", "high", "manifest", "manifest")]),
+        _report(
+            "wallet-1.apk",
+            [_finding("RULE-A", "Debuggable flag", "high", "manifest", "manifest")],
+        ),
         project_id=project.id,
         app_id=mobile_app.id,
         app_version_id=version_one.id,
@@ -129,7 +158,9 @@ def test_compare_endpoint_requires_same_app_and_returns_diff() -> None:
             "wallet-2.apk",
             [
                 _finding("RULE-A", "Debuggable flag", "medium", "manifest", "manifest"),
-                _finding("RULE-B", "New endpoint", "medium", "strings", "assets/config.txt"),
+                _finding(
+                    "RULE-B", "New endpoint", "medium", "strings", "assets/config.txt"
+                ),
             ],
         ),
         project_id=project.id,

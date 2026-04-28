@@ -15,7 +15,17 @@ URL_PATTERN = re.compile(r"https?://[\w\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNOREC
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|passwd|password|client[_-]?secret)\s*[:=]\s*[\"']?([A-Za-z0-9_\-+/=]{8,})"
 )
-TEXT_EXTENSIONS = {".plist", ".strings", ".txt", ".json", ".xml", ".swift", ".m", ".h", ".js"}
+TEXT_EXTENSIONS = {
+    ".plist",
+    ".strings",
+    ".txt",
+    ".json",
+    ".xml",
+    ".swift",
+    ".m",
+    ".h",
+    ".js",
+}
 MAX_TEXT_FILE_SIZE = 1_000_000
 MAX_TEXT_FILES_SCANNED = 200
 
@@ -91,7 +101,9 @@ def analyze_ios_package(
 
 def _extract_basic_metadata(archive: ZipFile, file_bytes: bytes) -> IosPackageMetadata:
     names = archive.namelist()
-    info_plist_path = next((name for name in names if name.endswith(".app/Info.plist")), None)
+    info_plist_path = next(
+        (name for name in names if name.endswith(".app/Info.plist")), None
+    )
 
     info = None
     if info_plist_path:
@@ -113,7 +125,9 @@ def _extract_basic_metadata(archive: ZipFile, file_bytes: bytes) -> IosPackageMe
     )
 
 
-def _build_metadata_findings(file_name: str, metadata: IosPackageMetadata) -> list[dict[str, str]]:
+def _build_metadata_findings(
+    file_name: str, metadata: IosPackageMetadata
+) -> list[dict[str, str]]:
     details = [
         f"archive_size_bytes={metadata.archive_size_bytes}",
         f"file_count={metadata.file_count}",
@@ -169,7 +183,9 @@ def _build_metadata_findings(file_name: str, metadata: IosPackageMetadata) -> li
     return findings
 
 
-def _inspect_info_plist(archive: ZipFile, metadata: IosPackageMetadata) -> list[dict[str, str]]:
+def _inspect_info_plist(
+    archive: ZipFile, metadata: IosPackageMetadata
+) -> list[dict[str, str]]:
     if not metadata.info_plist_path or not metadata.info_plist_readable:
         return []
 
@@ -203,7 +219,9 @@ def _inspect_info_plist(archive: ZipFile, metadata: IosPackageMetadata) -> list[
             }
         )
 
-    query_schemes = info.get("LSApplicationQueriesSchemes") if isinstance(info, dict) else None
+    query_schemes = (
+        info.get("LSApplicationQueriesSchemes") if isinstance(info, dict) else None
+    )
     if isinstance(query_schemes, list) and len(query_schemes) > 20:
         findings.append(
             {
@@ -256,7 +274,9 @@ def _scan_archive_strings(archive: ZipFile) -> list[dict[str, str]]:
 
         matched_urls = URL_PATTERN.findall(content)
         urls.update(matched_urls)
-        insecure_http_urls.update(url for url in matched_urls if url.lower().startswith("http://"))
+        insecure_http_urls.update(
+            url for url in matched_urls if url.lower().startswith("http://")
+        )
 
         for match in SECRET_PATTERN.finditer(content):
             secrets.add(f"{match.group(1)}={match.group(2)[:6]}...")
@@ -327,7 +347,10 @@ def _has_insecure_http_exceptions(ats: object) -> bool:
         return False
 
     for settings in exception_domains.values():
-        if isinstance(settings, dict) and settings.get("NSExceptionAllowsInsecureHTTPLoads") is True:
+        if (
+            isinstance(settings, dict)
+            and settings.get("NSExceptionAllowsInsecureHTTPLoads") is True
+        ):
             return True
     return False
 

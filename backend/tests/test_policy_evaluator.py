@@ -104,7 +104,9 @@ def test_policy_passes_when_rules_are_satisfied() -> None:
 def test_policy_endpoint_supports_ci_failure_status() -> None:
     store = ScanHistoryStore()
     report = _report(95, [_finding("CRIT-1", "critical")])
-    scan = store.save_report(report, project_name="CI", app_name="Pipeline", version_name="1.0.0")
+    scan = store.save_report(
+        report, project_name="CI", app_name="Pipeline", version_name="1.0.0"
+    )
 
     with TestClient(app) as client:
         response = client.get(
